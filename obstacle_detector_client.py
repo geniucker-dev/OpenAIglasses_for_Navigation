@@ -51,12 +51,21 @@ class ObstacleDetectorClient:
         try:
             logger.info("正在加载 YOLOE 障碍物模型...")
             self.model = YOLOE(model_path)
-            self.model.to(DEVICE)
             self.model.fuse()
             logger.info(f"YOLOE 障碍物模型加载成功，使用设备: {DEVICE}")
 
             logger.info("正在为 YOLOE 预计算白名单文本特征...")
-            if AMP_DTYPE is not None:
+            if DEVICE_TYPE == "mps":
+                original_device = next(self.model.model.parameters()).device
+                self.model.to("cpu")
+                with torch.inference_mode():
+                    self.whitelist_embeddings = self.model.get_text_pe(
+                        self.WHITELIST_CLASSES
+                    )
+                self.model.to(DEVICE)
+                if self.whitelist_embeddings is not None:
+                    self.whitelist_embeddings = self.whitelist_embeddings.to(DEVICE)
+            elif AMP_DTYPE is not None:
                 with (
                     torch.inference_mode(),
                     torch.amp.autocast(device_type=DEVICE_TYPE, dtype=AMP_DTYPE),
@@ -69,6 +78,8 @@ class ObstacleDetectorClient:
                     self.WHITELIST_CLASSES
                 )
             logger.info("YOLOE 特征预计算完成。")
+
+            self.model.to(DEVICE)
         except Exception as e:
             logger.error(f"YOLOE 模型加载或特征计算失败: {e}", exc_info=True)
             raise
