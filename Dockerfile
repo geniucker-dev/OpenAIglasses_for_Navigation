@@ -34,12 +34,15 @@ RUN apt-get update && apt-get install -y \
 # 升级 pip
 RUN python3 -m pip install --upgrade pip
 
-# 复制 requirements.txt
-COPY requirements.txt .
+# 安装 uv
+RUN pip install uv
 
-# 安装 Python 依赖
-RUN pip install torch==2.0.1+cu118 torchvision==0.15.2+cu118 --index-url https://download.pytorch.org/whl/cu118
-RUN pip install --no-cache-dir -r requirements.txt
+# 复制 pyproject.toml
+COPY pyproject.toml .
+
+# 安装 Python 依赖 (CUDA 11.8 PyTorch)
+RUN uv pip install --system torch==2.0.1+cu118 torchvision==0.15.2+cu118 --index-url https://download.pytorch.org/whl/cu118
+RUN uv pip install --system --no-cache -e .
 
 # 复制应用代码
 COPY . .
