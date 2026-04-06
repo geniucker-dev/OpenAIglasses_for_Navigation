@@ -1,36 +1,40 @@
 # yoloe_backend.py
-# -*- coding: utf-8 -*-
 from typing import List, Dict, Any, Optional, Tuple, Union
 import os
 import cv2
 import numpy as np
 
-# 兼容 YOLOE / YOLO
+from device_utils import DEVICE
+
 try:
     from ultralytics import YOLOE as _MODEL
 except Exception:
     from ultralytics import YOLO as _MODEL
 
-DEFAULT_MODEL_PATH = os.getenv("YOLOE_MODEL_PATH", r"C:\Users\Administrator\Desktop\rebuild1002\model\yoloe-11l-seg.pt")
-TRACKER_CFG        = os.getenv("YOLO_TRACKER_YAML", "bytetrack.yaml")
+DEFAULT_MODEL_PATH = os.getenv("YOLOE_MODEL_PATH", "model/yoloe-11l-seg.pt")
+TRACKER_CFG = os.getenv("YOLO_TRACKER_YAML", "bytetrack.yaml")
+
 
 class YoloEBackend:
-    def __init__(self, model_path: Optional[str] = None, device: Optional[Union[str, int]] = None):
+    def __init__(
+        self, model_path: Optional[str] = None, device: Optional[Union[str, int]] = None
+    ):
         self.model = _MODEL(model_path or DEFAULT_MODEL_PATH)
-        self.model.to("cuda")
-        self.device = device
+        self.model.to(device if device else DEVICE)
+        self.device = device if device else DEVICE
 
     def set_text_classes(self, names: List[str]):
         # YOLOE 文本提示：与你模板一致
         self.model.set_classes(names, self.model.get_text_pe(names))
 
-    def segment(self,
-                frame_bgr: np.ndarray,
-                conf: float = 0.20,
-                iou: float = 0.45,
-                imgsz: int = 640,
-                persist: bool = True
-                ) -> Dict[str, Any]:
+    def segment(
+        self,
+        frame_bgr: np.ndarray,
+        conf: float = 0.20,
+        iou: float = 0.45,
+        imgsz: int = 640,
+        persist: bool = True,
+    ) -> Dict[str, Any]:
         """
         返回:
           dict{
@@ -43,8 +47,12 @@ class YoloEBackend:
         """
         r = self.model.track(
             frame_bgr,
-            conf=conf, iou=iou, imgsz=imgsz,
-            persist=persist, tracker=TRACKER_CFG, verbose=False
+            conf=conf,
+            iou=iou,
+            imgsz=imgsz,
+            persist=persist,
+            tracker=TRACKER_CFG,
+            verbose=False,
         )[0]
 
         out = {"masks": [], "boxes": [], "cls_ids": [], "names": [], "ids": []}
@@ -61,12 +69,16 @@ class YoloEBackend:
 
         if boxes_obj is not None:
             xyxy = boxes_obj.xyxy.cpu().numpy()
-            cls  = boxes_obj.cls.cpu().tolist()
-            tids = boxes_obj.id.int().cpu().tolist() if boxes_obj.id is not None else [None]*N
+            cls = boxes_obj.cls.cpu().tolist()
+            tids = (
+                boxes_obj.id.int().cpu().tolist()
+                if boxes_obj.id is not None
+                else [None] * N
+            )
         else:
-            xyxy = [None]*N
-            cls  = [0]*N
-            tids = [None]*N
+            xyxy = [None] * N
+            cls = [0] * N
+            tids = [None] * N
 
         for i in range(N):
             bin_mask = (mask_arr[i] > 0.5).astype(np.uint8)

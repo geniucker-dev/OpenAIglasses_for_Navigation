@@ -54,6 +54,9 @@
 | `start_ai_with_text_custom` | Func | app_main.py:410 | 语音指令处理 |
 | `ws_camera_esp` | Func | app_main.py:863 | ESP32视频WebSocket |
 | `process_imu_and_maybe_store` | Func | app_main.py:1130 | IMU数据处理 |
+| `get_device` | Func | device_utils.py:17 | 设备自动选择 |
+| `DEVICE` | Var | device_utils.py:94 | 全局设备字符串 |
+| `gpu_infer_slot` | Func | device_utils.py:141 | GPU并发限流+AMP |
 
 ## CONVENTIONS
 
@@ -79,6 +82,12 @@
 ### 环境变量
 - **必需**: `DASHSCOPE_API_KEY` (阿里云ASR/Qwen)
 - 可选调参: `AIGLASS_MASK_MIN_AREA`, `AIGLASS_PANEL_SCALE`, `AIGLASS_DEVICE`
+
+### 设备选择 (CUDA > MPS > CPU 自动 Fallback)
+- 系统自动选择最佳计算设备：CUDA (NVIDIA GPU) > MPS (Apple Silicon) > CPU
+- 强制指定设备：设置环境变量 `AIGLASS_DEVICE=cuda` / `mps` / `cpu`
+- AMP 自动混合精度：CUDA 支持 bf16/fp16，MPS 支持 fp16
+- 配置文件: `device_utils.py`
 
 ### 项目特定约定
 - 使用 `pyproject.toml` 管理依赖
@@ -124,7 +133,7 @@ uv run python test_recorder.py
 
 ## NOTES
 
-- **GPU推荐**: CUDA 11.8+ (Linux/Windows)，macOS 使用 MPS 加速
+- **GPU推荐**: CUDA 11.8+ (Linux/Windows)，macOS 使用 MPS 加速，无 GPU 则自动使用 CPU
 - 模型文件需从 ModelScope 下载: https://www.modelscope.cn/models/archifancy/AIGlasses_for_navigation
 - 需手动创建 `.env` 并设置 `DASHSCOPE_API_KEY`
 - 测试文件在 `PROJECT_STRUCTURE.md` 中文档化，但实际不在仓库中
