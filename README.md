@@ -153,17 +153,41 @@ API_KEY = "your_api_key_here"
 ### 6. 启动系统
 
 ```bash
-python app_main.py
+uv run python app_main.py
 ```
 
 系统将在 `http://0.0.0.0:8081` 启动，打开浏览器访问即可看到实时监控界面。
 
-### 7. 连接设备（可选）
+### 7. 连接 ESP32 设备（可选）
 
-如果使用 ESP32-CAM，请：
-1. 烧录 `compile/compile.ino` 到 ESP32
-2. 修改 WiFi 配置，连接到同一网络
-3. ESP32 自动连接到 WebSocket 端点
+如果使用 XIAO ESP32S3 Sense，请：
+
+#### 修改配置
+编辑 `compile/compile.ino` 顶部的配置：
+```cpp
+const char* WIFI_SSID   = "你的WiFi名称";
+const char* WIFI_PASS   = "你的WiFi密码";
+const char* SERVER_HOST = "服务器IP地址";  // 如 "192.168.1.100" 或 "Mac.lan"
+```
+
+#### 烧录固件
+```bash
+# 安装 PlatformIO
+uv add --dev platformio
+
+# 编译并烧录
+cd compile
+uv run pio run --target upload
+```
+
+#### LED 状态指示
+| LED 状态 | 含义 |
+|---------|------|
+| 灭 | WiFi 未连接 |
+| 闪烁 | WiFi 已连接，等待服务器 |
+| 灭 | 服务器已连接（正常工作） |
+
+详细文档见 [compile/AGENTS.md](compile/AGENTS.md)
 
 ## 🏗️ 系统架构
 

@@ -16,10 +16,15 @@ struct WavFmt;
 using namespace websockets;
 
 // ===== WiFi / Server =====
-const char* WIFI_SSID   = "aiglass";
-const char* WIFI_PASS   = "xu137227";
-const char* SERVER_HOST = "47.100.161.139";
+const char* WIFI_SSID   = "ece445_tmp";
+const char* WIFI_PASS   = "ece445_tmppass";
+const char* SERVER_HOST = "Mac.lan";
 const uint16_t SERVER_PORT = 8081;
+
+// ===== Status LED =====
+#define STATUS_LED_PIN 21
+volatile bool wifi_connected = false;
+volatile bool server_connected = false;
 
 static const char* CAM_WS_PATH = "/ws/camera";
 static const char* AUD_WS_PATH = "/ws_audio";
@@ -60,7 +65,7 @@ const int TTS_RATE = 16000;
 #define IMU_SPI_MOSI  2   // D1
 #define IMU_SPI_MISO  3   // D2
 #define IMU_SPI_CS    4   // D3
-const char* UDP_HOST  = "47.100.161.139";
+const char* UDP_HOST  = "Mac.lan";
 const int   UDP_PORT  = 12345;
 
 WiFiUDP udp;
@@ -866,6 +871,10 @@ void setup() {
   Serial.begin(115200);
   delay(300);
 
+  // Initialize status LED (LOW = ON)
+  pinMode(STATUS_LED_PIN, OUTPUT);
+  digitalWrite(STATUS_LED_PIN, HIGH);  // LED OFF initially
+
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
   esp_wifi_set_ps(WIFI_PS_NONE);
@@ -874,8 +883,13 @@ void setup() {
 
   WiFi.begin(WIFI_SSID, WIFI_PASS);
   Serial.print("[WiFi] connecting");
-  while (WiFi.status()!=WL_CONNECTED){ delay(300); Serial.print("."); }
+  digitalWrite(STATUS_LED_PIN, HIGH);  // LED OFF while connecting to WiFi
+  while (WiFi.status()!=WL_CONNECTED){ 
+    delay(300); 
+    Serial.print("."); 
+  }
   Serial.println(" OK " + WiFi.localIP().toString());
+  wifi_connected = true;
 
   if (!init_camera()) { Serial.println("[CAM] init failed, reboot..."); delay(1500); esp_restart(); }
 
@@ -898,6 +912,7 @@ void setup() {
   wsCam.onEvent([](WebsocketsEvent ev, String){
     if (ev == WebsocketsEvent::ConnectionOpened)  { 
       cam_ws_ready = true;  
+      server_connected = true;
       Serial.println("[WS-CAM] open");
       // 重置统计
       frame_sent_count = 0;
@@ -907,7 +922,9 @@ void setup() {
     }
     if (ev == WebsocketsEvent::ConnectionClosed)  { 
       cam_ws_ready = false; 
-      Serial.printf("[WS-CAM] closed (sent=%lu, dropped=%lu, fail=%lu)\n", 
+      server_connected = false;
+      digitalWrite(STATUS_LED_PIN, LOW);  // LED ON = WiFi connected, waiting for server
+      Serial.printf("[WS-CAM] closed (sent=%lu, dropped=%lu, fail=%lu)\\n", 
                     frame_sent_count, frame_dropped_count, ws_send_fail_count);
     }
   });
@@ -993,8 +1010,11 @@ void setup() {
 
 void loop() {
   if (!wsCam.available()) {
+    // Blink LED while waiting for server (WiFi connected)
+    digitalWrite(STATUS_LED_PIN, !digitalRead(STATUS_LED_PIN));
     if (wsCam.connect(SERVER_HOST, SERVER_PORT, CAM_WS_PATH)) {
       Serial.println("[WS-CAM] connected");
+      digitalWrite(STATUS_LED_PIN, HIGH);  // LED OFF = Server connected
     } else { Serial.println("[WS-CAM] retry in 1s..."); delay(1000); }
   }
 

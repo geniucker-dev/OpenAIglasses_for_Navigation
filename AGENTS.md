@@ -1,7 +1,7 @@
 # AI智能盲人眼镜系统 (AIGlasses for Navigation)
 
-**Generated:** 2026-04-05
-**Commit:** 46d90ab
+**Generated:** 2026-04-07
+**Commit:** (latest)
 **Branch:** main
 
 ## OVERVIEW
@@ -20,8 +20,12 @@
 ├── asr_core.py              # 实时语音识别（DashScope Paraformer）
 ├── omni_client.py           # Qwen-Omni多模态对话
 ├── audio_player.py          # 多路音频混音播放
+├── device_utils.py          # 设备选择 (CUDA/MPS/CPU)
 ├── static/                  # 前端JS/CSS（Web监控界面）
-├── compile/                 # ESP32固件（Arduino .ino）
+├── compile/                 # ESP32固件（PlatformIO项目）
+│   ├── compile.ino          # 主程序
+│   ├── platformio.ini       # PlatformIO配置
+│   └── AGENTS.md            # 固件详细文档
 ├── model/                   # YOLO模型文件（需下载）
 ├── voice/                   # 预录语音资源
 └── music/                   # 系统提示音
@@ -57,6 +61,16 @@
 | `get_device` | Func | device_utils.py:17 | 设备自动选择 |
 | `DEVICE` | Var | device_utils.py:94 | 全局设备字符串 |
 | `gpu_infer_slot` | Func | device_utils.py:141 | GPU并发限流+AMP |
+
+### ESP32 固件 (compile/)
+
+| 符号 | 类型 | 位置 | 角色 |
+|------|------|------|------|
+| `WIFI_SSID` | Const | compile.ino:19 | WiFi名称 |
+| `SERVER_HOST` | Const | compile.ino:21 | 服务器地址 |
+| `STATUS_LED_PIN` | Const | compile.ino:25 | LED引脚 (GPIO21) |
+| `setup()` | Func | compile.ino:875 | 初始化WiFi/摄像头/I2S |
+| `loop()` | Func | compile.ino:1015 | WebSocket连接维护 |
 
 ## CONVENTIONS
 
@@ -121,6 +135,15 @@ uv sync
 # 启动服务
 uv run python app_main.py
 
+# ESP32 固件编译
+cd compile && uv run pio run
+
+# ESP32 固件烧录
+cd compile && uv run pio run --target upload
+
+# ESP32 串口监视
+screen /dev/tty.usbmodem* 115200
+
 # Docker
 docker compose up --build
 
@@ -142,3 +165,15 @@ uv run python test_recorder.py
   cp "voice/黄灯_原始.WAV" "voice/黄灯.WAV"
   ```
   否则启动时会提示 `[AUDIO] 映射文件缺失: voice/黄灯.WAV`
+
+### ESP32 固件
+
+- **开发板**: Seeed Studio XIAO ESP32S3 Sense
+- **摄像头**: OV2640 或 OV3660
+- **构建系统**: PlatformIO (推荐) 或 Arduino IDE
+- **LED状态**: GPIO21 (LOW=ON)
+  - 灭 = WiFi 未连接
+  - 闪烁 = WiFi 已连接，等待服务器
+  - 灭 = 服务器已连接
+- **PlatformIO 平台**: `https://github.com/pioarduino/platform-espressif32.git`
+- 详细文档见 `compile/AGENTS.md`
