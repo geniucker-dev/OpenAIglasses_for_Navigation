@@ -14,6 +14,7 @@ from ultralytics import YOLO
 import bridge_io
 from audio_player import play_voice_text  # 使用统一的语音播放接口
 import logging
+from device_utils import DEVICE
 
 logger = logging.getLogger(__name__)
 
@@ -124,13 +125,21 @@ def _init_font():
         "/System/Library/Fonts/STHeiti Light.ttc",
         "/System/Library/Fonts/STHeiti Medium.ttc",
         "/Library/Fonts/Arial Unicode.ttf",
-        r"C:\\Windows\\Fonts\\msyh.ttc",
-        r"C:\\Windows\\Fonts\\msyh.ttf",
-        r"C:\\Windows\\Fonts\\simhei.ttf",
-        r"C:\\Windows\\Fonts\\simfang.ttf",
-        r"C:\\Windows\\Fonts\\simsun.ttc",
-        r"C:\\Windows\\Fonts\\simsunb.ttf",
+        "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+        "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
     ]
+    win_font_dir = os.environ.get("WINDIR", "C:\\Windows") + "\\Fonts"
+    candidates.extend(
+        [
+            os.path.join(win_font_dir, "msyh.ttc"),
+            os.path.join(win_font_dir, "msyh.ttf"),
+            os.path.join(win_font_dir, "simhei.ttf"),
+            os.path.join(win_font_dir, "simfang.ttf"),
+            os.path.join(win_font_dir, "simsun.ttc"),
+            os.path.join(win_font_dir, "simsunb.ttf"),
+        ]
+    )
     for p in candidates:
         if os.path.exists(p):
             _FONT_PATH = p
@@ -217,7 +226,8 @@ def main(headless: bool = True, stop_event=None):
     print("[TRAFFIC] 加载 YOLO 红绿灯检测模型...")
     try:
         model = YOLO(YOLO_MODEL_PATH)
-        print(f"[TRAFFIC] 模型加载成功: {YOLO_MODEL_PATH}")
+        model.to(DEVICE)
+        print(f"[TRAFFIC] 模型加载成功: {YOLO_MODEL_PATH}, 设备: {DEVICE}")
     except Exception as e:
         print(f"[TRAFFIC] 模型加载失败: {e}")
         return
@@ -529,7 +539,8 @@ def init_model():
     try:
         print("[TRAFFIC] 加载 YOLO 红绿灯检测模型...")
         _model = YOLO(YOLO_MODEL_PATH)
-        print(f"[TRAFFIC] 模型加载成功: {YOLO_MODEL_PATH}")
+        _model.to(DEVICE)
+        print(f"[TRAFFIC] 模型加载成功: {YOLO_MODEL_PATH}, 设备: {DEVICE}")
         class_names = _model.names if hasattr(_model, "names") else {}
         print(f"[TRAFFIC] 模型类别: {class_names}")
         return True

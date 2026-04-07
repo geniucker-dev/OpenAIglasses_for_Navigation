@@ -19,13 +19,23 @@ class YoloEBackend:
     def __init__(
         self, model_path: Optional[str] = None, device: Optional[Union[str, int]] = None
     ):
+        self.device = str(device if device else DEVICE)
         self.model = _MODEL(model_path or DEFAULT_MODEL_PATH)
-        self.model.to(device if device else DEVICE)
-        self.device = device if device else DEVICE
+        self.model.to(self.device)
 
     def set_text_classes(self, names: List[str]):
-        # YOLOE 文本提示：与你模板一致
-        self.model.set_classes(names, self.model.get_text_pe(names))
+        import torch
+
+        orig_device = None
+        if self.device == "mps":
+            orig_device = getattr(self.model, "device", self.device)
+            self.model.to("cpu")
+        try:
+            text_pe = self.model.get_text_pe(names)
+            self.model.set_classes(names, text_pe)
+        finally:
+            if orig_device is not None:
+                self.model.to(orig_device)
 
     def segment(
         self,

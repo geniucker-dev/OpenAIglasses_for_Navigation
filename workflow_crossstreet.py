@@ -45,6 +45,76 @@ except Exception:
 
 logger = logging.getLogger(__name__)
 
+
+def _font_candidates() -> List[str]:
+    candidates = [
+        "/System/Library/Fonts/STHeiti Light.ttc",
+        "/System/Library/Fonts/STHeiti Medium.ttc",
+        "/System/Library/Fonts/Hiragino Sans GB.ttc",
+        "/Library/Fonts/Arial Unicode.ttf",
+        "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+        "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    ]
+    win_font_dir = os.path.join(os.environ.get("WINDIR", "C:\\Windows"), "Fonts")
+    candidates.extend(
+        [
+            os.path.join(win_font_dir, "msyh.ttc"),
+            os.path.join(win_font_dir, "msyh.ttf"),
+            os.path.join(win_font_dir, "simhei.ttf"),
+            os.path.join(win_font_dir, "simsun.ttc"),
+        ]
+    )
+    return candidates
+
+
+def _load_cjk_font(font_size: int):
+    if not PIL_AVAILABLE:
+        return None
+    for font_path in _font_candidates():
+        try:
+            if os.path.exists(font_path):
+                return ImageFont.truetype(font_path, font_size)
+        except Exception:
+            continue
+    try:
+        return ImageFont.load_default()
+    except Exception:
+        return None
+
+
+def _draw_text_pil(
+    image: np.ndarray,
+    text: str,
+    position,
+    font_size: int,
+    color=(255, 255, 255),
+    stroke_color=(0, 0, 0),
+    stroke_width: int = 1,
+):
+    if not PIL_AVAILABLE:
+        return None
+    font = _load_cjk_font(font_size)
+    if font is None:
+        return None
+    try:
+        pil_img = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+        draw = ImageDraw.Draw(pil_img)
+        rgb_color = (color[2], color[1], color[0])
+        rgb_stroke = (stroke_color[2], stroke_color[1], stroke_color[0])
+        draw.text(
+            position,
+            text,
+            font=font,
+            fill=rgb_color,
+            stroke_width=stroke_width,
+            stroke_fill=rgb_stroke,
+        )
+        return cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+    except Exception:
+        return None
+
+
 # ========== 状态常量 ==========
 STATE_SEEKING = "SEEKING_CROSSWALK"  # 寻找并对准远处的斑马线
 STATE_WAIT_LIGHT = "WAIT_TRAFFIC_LIGHT"  # 等待红绿灯判定
@@ -1049,24 +1119,15 @@ class CrossStreetNavigator:
             font_px = 14
             pad_x, pad_y = 14, 8
             bottom_margin = 28
+            scale = font_px / 24.0
 
             # 计算文字尺寸
+            font = None
             if PIL_AVAILABLE:
                 try:
                     from PIL import Image as PILImage, ImageDraw, ImageFont
 
-                    # 尝试加载中文字体
-                    font = None
-                    for font_path in [
-                        "C:/Windows/Fonts/msyh.ttc",
-                        "C:/Windows/Fonts/simhei.ttf",
-                    ]:
-                        if os.path.exists(font_path):
-                            try:
-                                font = ImageFont.truetype(font_path, font_px)
-                                break
-                            except:
-                                continue
+                    font = _load_cjk_font(font_px)
                     if font:
                         bbox = ImageDraw.Draw(PILImage.new("RGB", (1, 1))).textbbox(
                             (0, 0), full_text, font=font
@@ -1134,14 +1195,17 @@ class CrossStreetNavigator:
             text_x = left + pad_x
             text_y = top + pad_y + th
 
-            if PIL_AVAILABLE and font:
-                # 使用PIL绘制中文
-                pil_img = PILImage.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
-                draw = ImageDraw.Draw(pil_img)
-                draw.text(
-                    (text_x, top + pad_y), full_text, font=font, fill=(255, 255, 255)
-                )
-                image = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+            pil_drawn = _draw_text_pil(
+                image,
+                full_text,
+                (text_x, top + pad_y),
+                font_px,
+                color=(255, 255, 255),
+                stroke_color=(0, 0, 0),
+                stroke_width=1,
+            )
+            if pil_drawn is not None:
+                image = pil_drawn
             else:
                 # 使用OpenCV绘制
                 cv2.putText(
@@ -1168,21 +1232,7 @@ class CrossStreetNavigator:
             draw = ImageDraw.Draw(pil_img, "RGBA")
             env_scale = float(os.getenv("AIGLASS_PANEL_SCALE", "0.7"))
             base_font_size = max(10, int(round(14 * env_scale)))
-            font = None
-            font_paths = [
-                "C:/Windows/Fonts/msyh.ttc",
-                "C:/Windows/Fonts/simhei.ttf",
-                "C:/Windows/Fonts/simsun.ttc",
-                "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
-                "/System/Library/Fonts/PingFang.ttc",
-            ]
-            for font_path in font_paths:
-                try:
-                    if os.path.exists(font_path):
-                        font = ImageFont.truetype(font_path, base_font_size)
-                        break
-                except:
-                    continue
+            font = _load_cjk_font(base_font_size)
             if font is None:
                 font = ImageFont.load_default()
 
@@ -1303,27 +1353,39 @@ class CrossStreetNavigator:
                 color = self._parse_color(
                     element.get("color", "rgba(255, 255, 255, 1.0)")
                 )
-                for dx in [-1, 0, 1]:
-                    for dy in [-1, 0, 1]:
-                        if dx != 0 or dy != 0:
-                            cv2.putText(
-                                image,
-                                text,
-                                (pos[0] + dx, pos[1] + dy),
-                                cv2.FONT_HERSHEY_SIMPLEX,
-                                font_scale,
-                                (0, 0, 0),
-                                3,
-                            )
-                cv2.putText(
+                pil_drawn = _draw_text_pil(
                     image,
                     text,
                     tuple(pos),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    font_scale,
-                    color,
-                    2,
+                    max(14, int(24 * font_scale / 0.6)),
+                    color=color,
+                    stroke_color=(0, 0, 0),
+                    stroke_width=2,
                 )
+                if pil_drawn is not None:
+                    image = pil_drawn
+                else:
+                    for dx in [-1, 0, 1]:
+                        for dy in [-1, 0, 1]:
+                            if dx != 0 or dy != 0:
+                                cv2.putText(
+                                    image,
+                                    text,
+                                    (pos[0] + dx, pos[1] + dy),
+                                    cv2.FONT_HERSHEY_SIMPLEX,
+                                    font_scale,
+                                    (0, 0, 0),
+                                    3,
+                                )
+                    cv2.putText(
+                        image,
+                        text,
+                        tuple(pos),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        font_scale,
+                        color,
+                        2,
+                    )
             elif elem_type == "warning_icon":
                 pos = element.get("position", (100, 100))
                 level = element.get("level", "info")
@@ -1362,37 +1424,68 @@ class CrossStreetNavigator:
                 )
                 if text:
                     font_scale = 0.5
-                    (tw, th), _ = cv2.getTextSize(
-                        text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, 1
-                    )
-                    text_pos = (pos[0] - tw // 2, pos[1] + 20)
-                    for dx in [-1, 0, 1]:
-                        for dy in [-1, 0, 1]:
-                            if dx != 0 or dy != 0:
-                                cv2.putText(
-                                    image,
-                                    text,
-                                    (text_pos[0] + dx, text_pos[1] + dy),
-                                    cv2.FONT_HERSHEY_SIMPLEX,
-                                    font_scale,
-                                    (0, 0, 0),
-                                    2,
-                                )
-                    cv2.putText(
+                    text_pos = (pos[0] - 24, pos[1] + 20)
+                    pil_drawn = _draw_text_pil(
                         image,
                         text,
                         text_pos,
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        font_scale,
-                        text_color,
-                        1,
+                        18,
+                        color=text_color,
+                        stroke_color=(0, 0, 0),
+                        stroke_width=2,
                     )
+                    if pil_drawn is not None:
+                        image = pil_drawn
+                    else:
+                        (tw, th), _ = cv2.getTextSize(
+                            text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, 1
+                        )
+                        text_pos = (pos[0] - tw // 2, pos[1] + 20)
+                        for dx in [-1, 0, 1]:
+                            for dy in [-1, 0, 1]:
+                                if dx != 0 or dy != 0:
+                                    cv2.putText(
+                                        image,
+                                        text,
+                                        (text_pos[0] + dx, text_pos[1] + dy),
+                                        cv2.FONT_HERSHEY_SIMPLEX,
+                                        font_scale,
+                                        (0, 0, 0),
+                                        2,
+                                    )
+                        cv2.putText(
+                            image,
+                            text,
+                            text_pos,
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            font_scale,
+                            text_color,
+                            1,
+                        )
             elif elem_type == "text":
                 text = element.get("text", "")
                 pos = tuple(element.get("pos", (10, 30)))
-                cv2.putText(
-                    image, text, pos, cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2
+                pil_drawn = _draw_text_pil(
+                    image,
+                    text,
+                    pos,
+                    22,
+                    color=(255, 255, 255),
+                    stroke_color=(0, 0, 0),
+                    stroke_width=2,
                 )
+                if pil_drawn is not None:
+                    image = pil_drawn
+                else:
+                    cv2.putText(
+                        image,
+                        text,
+                        pos,
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.7,
+                        (255, 255, 255),
+                        2,
+                    )
 
         # 数据面板
         if PIL_AVAILABLE:
@@ -2188,7 +2281,7 @@ class YOLOModelWrapper:
         """使用 predict 方法并转换为 detect 格式"""
         try:
             results = self.model.predict(
-                image, conf=confidence_threshold, verbose=False
+                image, conf=confidence_threshold, verbose=False, device=DEVICE
             )
             detections = []
             if results and len(results) > 0:

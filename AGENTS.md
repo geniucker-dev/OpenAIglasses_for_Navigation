@@ -180,6 +180,19 @@ uv run python test_recorder.py
 
 ## RECENT FIXES
 
+### 2026-04-08: MPS / 状态保留 / 调试入口文档同步
+
+#### 已完成修复
+- `workflow_crossstreet.py` 中的 YOLO 包装推理现在显式传 `device=DEVICE`，避免仅依赖 `model.to(...)` 导致实际推理仍落到 CPU。
+- `trafficlight_detection.py` 中红绿灯 YOLO 模型加载后会显式 `.to(DEVICE)`，在 Apple Silicon 上可正确跑到 MPS。
+- `navigation_master.py` 的 `reset_for_camera_reconnect()` 会保留 `state`、`prev_nav_state_before_search` 和 `prev_target_state`，相机断线重连不再冲掉恢复目标。
+- `audio_player.py` 在 `voice/map.zh-CN.json` 缺失、损坏或为空时，会回退为按 `voice/*.wav` 文件名建立基础映射。
+- Web 监控页新增调试输入框，对应后端接口 `/api/debug_text`，可直接下发文本指令绕过 ASR 调试。
+
+#### 当前含义
+- 用户看到 GPU 占用低、CPU 高时，至少过马路分割和红绿灯检测这两条 YOLO 路径已经显式接入 `device_utils.DEVICE`，后续优先检查的是运行环境的 `AIGLASS_DEVICE` / PyTorch MPS 可用性，而不是这两处业务代码忘记传设备。
+- 相机 websocket 的断线重连现在只重置瞬时计数器，不再把导航状态机强制打回默认导航目标。
+
 ### 2026-04-07: WebSocket 传输稳定性修复
 
 #### 问题描述

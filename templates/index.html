@@ -17,10 +17,13 @@
   }
 
   /* 两栏布局 */
-  .app{display:grid; grid-template-columns: 1fr 700px; gap:16px; height:100vh; padding:16px}
+  .app{display:grid; grid-template-columns: minmax(0, 1fr) 700px; gap:16px; min-height:100vh; padding:16px}
+  .visual-column{display:flex; flex-direction:column; gap:16px; min-width:0}
   .stage{
     position:relative; border:1px solid var(--line); border-radius:14px;
     background:#0a1017; box-shadow:0 10px 30px rgba(0,0,0,.25); overflow:hidden;
+    min-height:420px;
+    aspect-ratio:4 / 3;
   }
   .canvas-wrap, #canvas{position:absolute; inset:0; width:100%; height:100%; display:block; background:#000; z-index:10}
 
@@ -39,26 +42,28 @@
   .kv{display:flex; justify-content:space-between; align-items:center;
       border-top:1px dashed rgba(255,255,255,.15); padding-top:6px; margin-top:6px; color:var(--muted); font-size:12px}
 
-  /* 左上角 IMU 浮窗 —— 宽一些 + 横向布局：左模型 / 右数据 */
+  /* IMU 面板 —— 放在视频下方，不再覆盖视频 */
   .imu-float{
-    position:absolute; left:12px; top:12px; z-index:35;
-    width: 900px;                /* ← 加长：横向空间更大 */
+    position:relative;
+    width:100%;
     border:2px dashed rgba(255,255,255,.35);
     border-radius:12px;
     background:var(--panel);
     backdrop-filter: blur(8px) saturate(130%);
     box-shadow: inset 0 0 0 1px rgba(255,255,255,.06);
     padding:10px;
+    display:none;
   }
+  .imu-float.visible{display:block}
   .imu-row{
     display:grid;
-    grid-template-columns: 1.8fr 1fr;  /* ← 左更宽，右放数据 */
+    grid-template-columns: minmax(0, 1.4fr) minmax(280px, 1fr);
     gap:12px;
     align-items:stretch;
   }
   #imu_view{
     position:relative;
-    min-height: 300px;           /* ← 模型区域更高 */
+    min-height:220px;
     background:#0a1017; border-radius:10px;
   }
   #imu_hud{
@@ -111,7 +116,7 @@
     background: var(--card);
     box-shadow: 0 10px 30px rgba(0, 0, 0, 0.25);
     overflow: hidden;
-    height: 100vh; /* 确保 .chat 容器占据整个视口高度 */
+    min-height: 0;
   }
 
   .chat-head{display:flex;align-items:center;justify-content:space-between;padding:12px 14px;border-bottom:1px solid var(--line)}
@@ -149,6 +154,29 @@
   .from-me {align-self:flex-end;   background:#12263a}
 
   .controls{display:flex;gap:8px}
+  .debug-input{
+    display:flex;
+    gap:8px;
+    padding:12px 14px 14px;
+    border-top:1px solid var(--line);
+    background:#101722;
+  }
+  .debug-input input{
+    flex:1;
+    min-width:0;
+    padding:10px 12px;
+    border-radius:10px;
+    border:1px solid #304057;
+    background:#0b1119;
+    color:var(--text);
+    font:inherit;
+  }
+  .debug-input input::placeholder{color:var(--muted)}
+  .debug-input input:focus{
+    outline:none;
+    border-color:#1f6feb;
+    box-shadow:0 0 0 3px rgba(31,111,235,.18);
+  }
   button{background:#1f6feb;border:1px solid #1f6feb;color:#fff;border-radius:10px;padding:8px 12px;font-weight:600;cursor:pointer}
   .ghost{background:transparent;border-color:#304057;color:#9fb0c3}
 
@@ -156,19 +184,89 @@
   .hidden-controls{display:none}
 
   @media (max-width:1100px){
-    .app{grid-template-columns:1fr; height:auto}
-    .chat{height:60vh}
+    .app{grid-template-columns:1fr}
+    .stage{min-height:360px}
+    .chat{min-height:420px}
+  }
+
+  @media (max-width:900px){
+    .tri-panels{
+      right:10px;
+      top:auto;
+      bottom:10px;
+      grid-template-columns:1fr;
+      max-width:min(320px, calc(100vw - 32px));
+    }
+    .imu-row{grid-template-columns:1fr}
+  }
+
+  @media (max-width:768px){
+    body{font-size:15px}
+    .app{
+      grid-template-columns:1fr;
+      gap:12px;
+      padding:12px;
+      min-height:auto;
+    }
+    .stage{
+      min-height:320px;
+      aspect-ratio:4 / 3;
+      overflow:hidden;
+    }
+    .imu-float{
+      padding:8px;
+    }
+    .imu-row{
+      grid-template-columns:1fr;
+      gap:8px;
+    }
+    #imu_view{min-height:220px}
+    #imu_hud{max-height:240px}
+    .tri-panels{display:none}
+    .chat{
+      min-height:50vh;
+      max-height:none;
+    }
+    .chat-head{
+      padding:10px 12px;
+      gap:10px;
+      align-items:flex-start;
+      flex-direction:column;
+    }
+    .badges,.controls{width:100%}
+    .controls{flex-wrap:wrap}
+    .controls button{flex:1 1 140px}
+    .chat-list{padding:10px; gap:8px}
+    .live,.finals{padding:10px}
+    .partial{font-size:18px; min-height:2em}
+    .debug-input{
+      flex-direction:column;
+      padding:10px 12px 12px;
+    }
+    .debug-input button{width:100%}
+  }
+
+  @media (max-width:480px){
+    body{font-size:14px}
+    .app{padding:10px; gap:10px}
+    .stage{min-height:280px}
+    .imu-float{padding:8px}
+    #imu_view{min-height:190px}
+    #imu_hud{padding:8px; max-height:220px}
+    .badge{font-size:11px; padding:4px 7px}
+    button{padding:8px 10px}
+    .debug-input input{padding:9px 11px}
   }
 </style>
 </head>
 <body>
 
 <div class="app">
-  <!-- 左侧主舞台 -->
-  <section class="stage">
-    <div class="canvas-wrap"><canvas id="canvas"></canvas></div>
+  <section class="visual-column">
+    <section class="stage">
+      <div class="canvas-wrap"><canvas id="canvas"></canvas></div>
+    </section>
 
-    <!-- 左上角：IMU 浮窗（横向） -->
     <div class="imu-float">
       <div class="imu-row">
         <div id="imu_view"></div>
@@ -180,9 +278,6 @@
         <span class="badge" id="imu_ws_state">connecting…</span>
       </div>
     </div>
-
-
-
   </section>
 
   <!-- 右侧聊天 -->
@@ -194,8 +289,9 @@
         <span id="fps" class="badge">FPS: --</span>
       </div>
       <div class="controls">
-        <button class="ghost" id="btnClear">清空 Final</button>
-        <button id="btnReconnect">重连</button>
+        <button type="button" class="ghost" id="btnToggleImu">IMU</button>
+        <button type="button" class="ghost" id="btnClear">清空 Final</button>
+        <button type="button" id="btnReconnect">重连</button>
       </div>
     </div>
     <div class="chat-list">
@@ -208,12 +304,16 @@
         <ul id="finalList"></ul>
       </div>
     </div>
+    <div class="debug-input">
+      <input type="text" id="debugText" placeholder="输入调试指令..." />
+      <button type="button" id="btnDebugSend">发送</button>
+    </div>
   </aside>
 </div>
 
 <!-- 隐藏但保留：校准/滑杆（供 main.js 使用） -->
 <div class="hidden-controls">
-  <button id="btn_zero"></button><button id="btn_reset"></button><button id="btn_bias_now"></button>
+  <button type="button" id="btn_zero"></button><button type="button" id="btn_reset"></button><button type="button" id="btn_bias_now"></button>
   <input id="auto_rezero" type="checkbox" checked /><input id="auto_bias" type="checkbox" checked />
   <input id="use_proj" type="checkbox" checked /><input id="freeze_still" type="checkbox" checked />
   <select id="medn"><option>3</option><option selected>5</option><option>7</option></select>

@@ -24,6 +24,7 @@ static/
 | 视频流渲染 | `vision.js` |
 | IMU 3D可视化 | `visualizer.js` |
 | 样式修改 | `vision.css` |
+| 调试输入框/按钮 | `main.js` + `templates/index.html` |
 
 ## CONVENTIONS
 
@@ -45,6 +46,16 @@ static/
 - 手动重连按钮 (`#btnReconnect`) 仍然保留，与自动重连互不冲突
 - 重连逻辑位于 `scheduleReconnect()` 函数
 - 使用 `camReconnectTimer` 和 `uiReconnectTimer` 避免重复重连
+
+## DEBUG INPUT
+
+- Web 监控页提供调试输入框，可直接向后端 `/api/debug_text` 发送文本指令，绕过 ASR 便于调试状态机。
+- 适合验证 `开始过马路`、`停止导航`、`帮我找一下红牛` 这类指令，而不必等待语音识别链路。
+
+## MOBILE LAYOUT
+
+- IMU 面板已从视频覆盖层改为视频下方的独立区域，避免手机端遮挡画面。
+- Canvas 渲染按原始宽高比等比缩放，使用留黑边而不是拉伸，避免 4:3 画面在手机端变形。
 
 ## STATUS BADGES
 

@@ -13,16 +13,19 @@ from workflow_blindpath import BlindPathNavigator, ProcessingResult as BlindResu
 from workflow_crossstreet import CrossStreetNavigator, CrossStreetResult as CrossResult
 
 # ========== 状态常量 ==========
-IDLE = "IDLE"                          # 空闲/未启用
-CHAT = "CHAT"                          # 对话模式（不进行导航，只返回原始画面）
-BLINDPATH_NAV = "BLINDPATH_NAV"        # 正在走盲道（复用 BlindPathNavigator）
-SEEKING_CROSSWALK = "SEEKING_CROSSWALK"# 盲道阶段发现斑马线，正对准/靠近
-WAIT_TRAFFIC_LIGHT = "WAIT_TRAFFIC_LIGHT" # 到达斑马线后等待交通灯（可选/占位）
-CROSSING = "CROSSING"                  # 正在过马路（复用 CrossStreetNavigator）
-SEEKING_NEXT_BLINDPATH = "SEEKING_NEXT_BLINDPATH" # 过完马路后寻找下一段盲道入口（上盲道）
-RECOVERY = "RECOVERY"                  # 兜底/恢复（感知暂时丢失时）
+IDLE = "IDLE"  # 空闲/未启用
+CHAT = "CHAT"  # 对话模式（不进行导航，只返回原始画面）
+BLINDPATH_NAV = "BLINDPATH_NAV"  # 正在走盲道（复用 BlindPathNavigator）
+SEEKING_CROSSWALK = "SEEKING_CROSSWALK"  # 盲道阶段发现斑马线，正对准/靠近
+WAIT_TRAFFIC_LIGHT = "WAIT_TRAFFIC_LIGHT"  # 到达斑马线后等待交通灯（可选/占位）
+CROSSING = "CROSSING"  # 正在过马路（复用 CrossStreetNavigator）
+SEEKING_NEXT_BLINDPATH = (
+    "SEEKING_NEXT_BLINDPATH"  # 过完马路后寻找下一段盲道入口（上盲道）
+)
+RECOVERY = "RECOVERY"  # 兜底/恢复（感知暂时丢失时）
 TRAFFIC_LIGHT_DETECTION = "TRAFFIC_LIGHT_DETECTION"  # 红绿灯检测模式
-ITEM_SEARCH = "ITEM_SEARCH"            # 找物品模式（暂停导航，由yolomedia处理画面）
+ITEM_SEARCH = "ITEM_SEARCH"  # 找物品模式（暂停导航，由yolomedia处理画面）
+
 
 # ========== 返回结构 ==========
 @dataclass
@@ -31,6 +34,7 @@ class OrchestratorResult:
     guidance_text: str
     state: str
     extras: Dict[str, Any]
+
 
 # ========== 实用：信号平滑/多数表决 ==========
 class MajorityFilter:
@@ -47,7 +51,11 @@ class MajorityFilter:
         for v in self.buf:
             cnt[v] = cnt.get(v, 0) + 1
         # 稳健排序：unknown 权重最低
-        items = sorted(cnt.items(), key=lambda x: (0 if x[0]=="unknown" else 1, x[1]), reverse=True)
+        items = sorted(
+            cnt.items(),
+            key=lambda x: (0 if x[0] == "unknown" else 1, x[1]),
+            reverse=True,
+        )
         return items[0][0]
 
     def history(self) -> List[str]:
@@ -55,6 +63,7 @@ class MajorityFilter:
 
     def clear(self):
         self.buf.clear()
+
 
 # ========== 红绿灯识别 ==========
 class TrafficLightDetector:
@@ -64,12 +73,14 @@ class TrafficLightDetector:
     2) 回退：无模型时，使用 HSV 颜色启发式在上半屏寻找亮红/黄/绿的“灯团”。
     输出：('red'|'green'|'yellow'|'unknown', meta)
     """
+
     def __init__(self):
         self.has_backend = False
         self.backend = None
         try:
             # 尝试动态导入（根据你本地 yoloe_backend 的接口调整）
             import yoloe_backend as _yeb  # noqa
+
             self.backend = _yeb
             self.has_backend = True
         except Exception:
@@ -110,14 +121,24 @@ class TrafficLightDetector:
         boxes = []
         for item in res:
             # 统一盒字段
-            if "box" in item and isinstance(item["box"], (list, tuple)) and len(item["box"]) == 4:
+            if (
+                "box" in item
+                and isinstance(item["box"], (list, tuple))
+                and len(item["box"]) == 4
+            ):
                 x1, y1, x2, y2 = item["box"]
-            elif "bbox" in item and isinstance(item["bbox"], (list, tuple)) and len(item["bbox"]) == 4:
+            elif (
+                "bbox" in item
+                and isinstance(item["bbox"], (list, tuple))
+                and len(item["bbox"]) == 4
+            ):
                 x1, y1, x2, y2 = item["bbox"]
             else:
                 continue
-            x1 = int(max(0, min(W-1, x1))); x2 = int(max(0, min(W-1, x2)))
-            y1 = int(max(0, min(H-1, y1))); y2 = int(max(0, min(H-1, y2)))
+            x1 = int(max(0, min(W - 1, x1)))
+            x2 = int(max(0, min(W - 1, x2)))
+            y1 = int(max(0, min(H - 1, y1)))
+            y2 = int(max(0, min(H - 1, y2)))
             if x2 <= x1 or y2 <= y1:
                 continue
             area = (x2 - x1) * (y2 - y1)
@@ -141,18 +162,22 @@ class TrafficLightDetector:
         hsv = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2HSV)
 
         # 红色范围（两段）
-        lower_red1 = np.array([0, 80, 120]); upper_red1 = np.array([10, 255, 255])
-        lower_red2 = np.array([160, 80, 120]); upper_red2 = np.array([180, 255, 255])
+        lower_red1 = np.array([0, 80, 120])
+        upper_red1 = np.array([10, 255, 255])
+        lower_red2 = np.array([160, 80, 120])
+        upper_red2 = np.array([180, 255, 255])
         mask_r1 = cv2.inRange(hsv, lower_red1, upper_red1)
         mask_r2 = cv2.inRange(hsv, lower_red2, upper_red2)
         mask_red = cv2.bitwise_or(mask_r1, mask_r2)
 
         # 绿色
-        lower_green = np.array([40, 60, 120]); upper_green = np.array([90, 255, 255])
+        lower_green = np.array([40, 60, 120])
+        upper_green = np.array([90, 255, 255])
         mask_green = cv2.inRange(hsv, lower_green, upper_green)
 
         # 黄色
-        lower_yellow = np.array([18, 80, 150]); upper_yellow = np.array([35, 255, 255])
+        lower_yellow = np.array([18, 80, 150])
+        upper_yellow = np.array([35, 255, 255])
         mask_yellow = cv2.inRange(hsv, lower_yellow, upper_yellow)
 
         # 面积阈值（相对 ROI）
@@ -164,9 +189,12 @@ class TrafficLightDetector:
         # 简单抑制“脏背景导致的弱响应”
         thr = 0.03
         candidates = []
-        if r_ratio > thr: candidates.append(("red", r_ratio))
-        if g_ratio > thr: candidates.append(("green", g_ratio))
-        if y_ratio > thr: candidates.append(("yellow", y_ratio))
+        if r_ratio > thr:
+            candidates.append(("red", r_ratio))
+        if g_ratio > thr:
+            candidates.append(("green", g_ratio))
+        if y_ratio > thr:
+            candidates.append(("yellow", y_ratio))
         if not candidates:
             return "unknown"
         candidates.sort(key=lambda x: x[1], reverse=True)
@@ -184,7 +212,7 @@ class TrafficLightDetector:
 
         # 2) 回退：上半屏 HSV 聚类 + 连通域，选最大“灯团”判色
         H, W = bgr.shape[:2]
-        roi = bgr[:int(H * 0.5), :]
+        roi = bgr[: int(H * 0.5), :]
         hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
 
         # 高亮阈值（抑制暗部/车灯）
@@ -193,61 +221,106 @@ class TrafficLightDetector:
 
         # 粗分颜色
         col = self._classify_color_hsv(roi)
-        return col, {"method": "fallback", "note": "no_backend", "bright_ratio": float(np.mean(bright > 0))}
+        return col, {
+            "method": "fallback",
+            "note": "no_backend",
+            "bright_ratio": float(np.mean(bright > 0)),
+        }
+
 
 # ========== 视觉辅助工具 ==========
 def _color_bgr(name: str) -> Tuple[int, int, int]:
-    if name == "red": return (0, 0, 255)
-    if name == "green": return (0, 255, 0)
-    if name == "yellow": return (0, 255, 255)
-    if name == "blue": return (255, 0, 0)
-    if name == "orange": return (0, 165, 255)
-    if name == "cyan": return (255, 255, 0)
-    if name == "magenta": return (255, 0, 255)
-    if name == "gray": return (128, 128, 128)
-    if name == "white": return (255, 255, 255)
+    if name == "red":
+        return (0, 0, 255)
+    if name == "green":
+        return (0, 255, 0)
+    if name == "yellow":
+        return (0, 255, 255)
+    if name == "blue":
+        return (255, 0, 0)
+    if name == "orange":
+        return (0, 165, 255)
+    if name == "cyan":
+        return (255, 255, 0)
+    if name == "magenta":
+        return (255, 0, 255)
+    if name == "gray":
+        return (128, 128, 128)
+    if name == "white":
+        return (255, 255, 255)
     return (200, 200, 200)
 
-def _put_text(img, text, org, color=(255,255,255), scale=0.7, thick=2, outline=True):
+
+def _put_text(img, text, org, color=(255, 255, 255), scale=0.7, thick=2, outline=True):
     if outline:
-        for dx in (-1,0,1):
-            for dy in (-1,0,1):
-                if dx==0 and dy==0: continue
-                cv2.putText(img, text, (org[0]+dx, org[1]+dy), cv2.FONT_HERSHEY_SIMPLEX, scale, (0,0,0), thick+1)
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                if dx == 0 and dy == 0:
+                    continue
+                cv2.putText(
+                    img,
+                    text,
+                    (org[0] + dx, org[1] + dy),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    scale,
+                    (0, 0, 0),
+                    thick + 1,
+                )
     cv2.putText(img, text, org, cv2.FONT_HERSHEY_SIMPLEX, scale, color, thick)
 
+
 def _draw_badge(img, text, pos=(10, 28), fg="white", bg="blue"):
-    color_fg = _color_bgr(fg); color_bg = _color_bgr(bg)
+    color_fg = _color_bgr(fg)
+    color_bg = _color_bgr(bg)
     (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
     x, y = pos
     pad = 6
-    cv2.rectangle(img, (x-4, y-th-pad), (x+tw+8, y+pad//2), color_bg, -1)
+    cv2.rectangle(img, (x - 4, y - th - pad), (x + tw + 8, y + pad // 2), color_bg, -1)
     _put_text(img, text, (x, y), color=color_fg, scale=0.6, thick=2, outline=False)
+
 
 def _draw_state_panel(img, kv: Dict[str, Any], pos=(10, 60)):
     x, y = pos
     line_h = 22
     for i, (k, v) in enumerate(kv.items()):
-        _put_text(img, f"{k}: {v}", (x, y + i*line_h), color=(255,255,255), scale=0.6, thick=2)
+        _put_text(
+            img,
+            f"{k}: {v}",
+            (x, y + i * line_h),
+            color=(255, 255, 255),
+            scale=0.6,
+            thick=2,
+        )
 
-def _draw_frame_border(img, color=(0,255,0), thickness=3):
+
+def _draw_frame_border(img, color=(0, 255, 0), thickness=3):
     h, w = img.shape[:2]
-    cv2.rectangle(img, (0,0), (w-1, h-1), color, thickness)
+    cv2.rectangle(img, (0, 0), (w - 1, h - 1), color, thickness)
+
 
 def _draw_progress_bar(img, ratio: float, pos=(10, 90), size=(180, 10), color="cyan"):
     ratio = max(0.0, min(1.0, float(ratio)))
     x, y = pos
     w, h = size
-    cv2.rectangle(img, (x, y), (x+w, y+h), (80,80,80), 1)
-    cv2.rectangle(img, (x+1, y+1), (x+1+int((w-2)*ratio), y+h-1), _color_bgr(color), -1)
+    cv2.rectangle(img, (x, y), (x + w, y + h), (80, 80, 80), 1)
+    cv2.rectangle(
+        img,
+        (x + 1, y + 1),
+        (x + 1 + int((w - 2) * ratio), y + h - 1),
+        _color_bgr(color),
+        -1,
+    )
+
 
 # ========== 统领器 ==========
 class NavigationMaster:
-    def __init__(self,
-                 blind_nav: BlindPathNavigator,
-                 cross_nav: CrossStreetNavigator,
-                 *,
-                 min_tts_interval: float = 1.2):
+    def __init__(
+        self,
+        blind_nav: BlindPathNavigator,
+        cross_nav: CrossStreetNavigator,
+        *,
+        min_tts_interval: float = 1.2,
+    ):
         self.blind = blind_nav
         self.cross = cross_nav
         self.state = IDLE
@@ -255,10 +328,10 @@ class NavigationMaster:
         self.min_tts_interval = min_tts_interval
 
         # 防抖/稳定计数
-        self.cnt_crosswalk_seen = 0         # 盲道侧看见斑马线（approaching/ready）
-        self.cnt_align_ready = 0            # 斑马线 ready + 对准达标
-        self.cnt_cross_end = 0              # 过马路结束条件累计
-        self.cnt_lost = 0                   # 感知丢失累计（进入 RECOVERY）
+        self.cnt_crosswalk_seen = 0  # 盲道侧看见斑马线（approaching/ready）
+        self.cnt_align_ready = 0  # 斑马线 ready + 对准达标
+        self.cnt_cross_end = 0  # 过马路结束条件累计
+        self.cnt_lost = 0  # 感知丢失累计（进入 RECOVERY）
 
         # 冷却期避免状态抖动
         self.cooldown_until = 0.0
@@ -270,6 +343,7 @@ class NavigationMaster:
         self.tld = TrafficLightDetector()
         self.tl_major = MajorityFilter(size=8)
         self.tl_last_color = "unknown"
+        self._last_wait_light_announce = 0
 
         # 参数（可按现场再调）
         self.FRAMES_CROSS_SEEN = 8
@@ -282,56 +356,67 @@ class NavigationMaster:
         self.OFFSET_ALIGN_THR = 0.15
 
         self.COOLDOWN_SEC = 0.6
-        
+
         # 找物品状态管理
         self.prev_nav_state_before_search = None  # 找物品前的导航状态，用于恢复
 
     # ----- 外部交互 -----
     def get_state(self) -> str:
         return self.state
-    
+
     def start_blind_path_navigation(self):
         """启动盲道导航模式"""
         self.state = BLINDPATH_NAV
         self.cooldown_until = time.time() + self.COOLDOWN_SEC
         if self.blind:
             self.blind.reset()
-    
+
     def stop_navigation(self):
         """停止导航，回到对话模式"""
         self.state = CHAT
         self.cooldown_until = time.time() + self.COOLDOWN_SEC
         if self.blind:
             self.blind.reset()
-    
+
     def start_crossing(self):
         """启动过马路模式"""
         self.state = CROSSING
         self.cooldown_until = time.time() + self.COOLDOWN_SEC
         if self.cross:
             self.cross.reset()
-    
+
     def start_traffic_light_detection(self):
         """启动红绿灯检测模式"""
         self.state = TRAFFIC_LIGHT_DETECTION
         self.cooldown_until = time.time() + self.COOLDOWN_SEC
-    
+
     def is_in_navigation_mode(self):
         """检查是否在导航模式（非对话模式）"""
-        return self.state not in ["CHAT", "IDLE", "TRAFFIC_LIGHT_DETECTION", "ITEM_SEARCH"]
-    
+        return self.state not in [
+            "CHAT",
+            "IDLE",
+            "TRAFFIC_LIGHT_DETECTION",
+            "ITEM_SEARCH",
+        ]
+
     def start_item_search(self):
         """启动找物品模式，暂停当前导航"""
         # 保存当前导航状态（如果在导航中）
-        if self.state in [BLINDPATH_NAV, SEEKING_CROSSWALK, WAIT_TRAFFIC_LIGHT, CROSSING, SEEKING_NEXT_BLINDPATH]:
+        if self.state in [
+            BLINDPATH_NAV,
+            SEEKING_CROSSWALK,
+            WAIT_TRAFFIC_LIGHT,
+            CROSSING,
+            SEEKING_NEXT_BLINDPATH,
+        ]:
             self.prev_nav_state_before_search = self.state
             print(f"[NAV MASTER] 暂停导航状态 {self.state}，切换到找物品模式")
         else:
             self.prev_nav_state_before_search = None
-        
+
         self.state = ITEM_SEARCH
         self.cooldown_until = time.time() + self.COOLDOWN_SEC
-    
+
     def stop_item_search(self, restore_nav: bool = True):
         """停止找物品模式"""
         # 如果需要恢复之前的导航状态
@@ -343,7 +428,7 @@ class NavigationMaster:
             # 否则回到对话模式
             self.state = CHAT
             print(f"[NAV MASTER] 找物品结束，回到对话模式")
-        
+
         self.cooldown_until = time.time() + self.COOLDOWN_SEC
 
     def force_state(self, s: str):
@@ -354,7 +439,14 @@ class NavigationMaster:
         t = (text or "").strip()
         if "开始过马路" in t:
             # 直接进入等待/或立即过马路（低速环境可直过）
-            if self.state in (BLINDPATH_NAV, SEEKING_CROSSWALK, WAIT_TRAFFIC_LIGHT, IDLE, RECOVERY, SEEKING_NEXT_BLINDPATH):
+            if self.state in (
+                BLINDPATH_NAV,
+                SEEKING_CROSSWALK,
+                WAIT_TRAFFIC_LIGHT,
+                IDLE,
+                RECOVERY,
+                SEEKING_NEXT_BLINDPATH,
+            ):
                 self.state = WAIT_TRAFFIC_LIGHT
                 self.cooldown_until = time.time() + self.COOLDOWN_SEC
         elif "立即通过" in t or "现在通过" in t:
@@ -385,6 +477,31 @@ class NavigationMaster:
         except Exception:
             pass
 
+    def reset_for_camera_reconnect(self):
+        preserved_state = self.state
+        preserved_prev_nav_state = self.prev_nav_state_before_search
+        preserved_prev_target_state = self.prev_target_state
+        self.cnt_crosswalk_seen = 0
+        self.cnt_align_ready = 0
+        self.cnt_cross_end = 0
+        self.cnt_lost = 0
+        self.last_guidance_ts = 0.0
+        self.tl_major.clear()
+        self.tl_last_color = "unknown"
+        self._last_wait_light_announce = 0
+        self.cooldown_until = time.time() + self.COOLDOWN_SEC
+        try:
+            self.blind.reset()
+        except Exception:
+            pass
+        try:
+            self.cross.reset()
+        except Exception:
+            pass
+        self.state = preserved_state
+        self.prev_nav_state_before_search = preserved_prev_nav_state
+        self.prev_target_state = preserved_prev_target_state
+
     # ----- 内部工具 -----
     def _say(self, now: float, text: str) -> str:
         if not text:
@@ -400,7 +517,15 @@ class NavigationMaster:
         color_bgr = _color_bgr(color)
         # 角标与文本
         cv2.circle(img, (24, 24), 10, color_bgr, -1)
-        _put_text(img, f"信号灯: {color}", (40, 30), color=color_bgr, scale=0.6, thick=2, outline=False)
+        _put_text(
+            img,
+            f"信号灯: {color}",
+            (40, 30),
+            color=color_bgr,
+            scale=0.6,
+            thick=2,
+            outline=False,
+        )
         # 画 bbox（若有）
         if meta and "bbox" in meta:
             x1, y1, x2, y2 = meta["bbox"]
@@ -413,50 +538,65 @@ class NavigationMaster:
             r = 6
             gap = 16
             for i, hcol in enumerate(hist[-12:]):
-                cv2.circle(img, (x0 + i*gap, y0), r, _color_bgr(hcol), -1)
-            _put_text(img, "信号历史", (x0, y0+20), color=(255,255,255), scale=0.5, thick=1)
+                cv2.circle(img, (x0 + i * gap, y0), r, _color_bgr(hcol), -1)
+            _put_text(
+                img,
+                "信号历史",
+                (x0, y0 + 20),
+                color=(255, 255, 255),
+                scale=0.5,
+                thick=1,
+            )
 
     # ----- 主循环 -----
     def process_frame(self, bgr: np.ndarray) -> OrchestratorResult:
         now = time.time()
-        
+
         # 【修改】IDLE状态默认进入CHAT模式，而不是自动开始导航
         if self.state == IDLE:
             self.state = CHAT
             self.cooldown_until = now + self.COOLDOWN_SEC
-        
+
         # 【新增】CHAT模式：只返回原始画面，不进行导航
         if self.state == CHAT:
             return OrchestratorResult(
                 annotated_image=bgr,
                 guidance_text="",
                 state="CHAT",
-                extras={"mode": "对话模式"}
+                extras={"mode": "对话模式"},
             )
-        
+
         # 【新增】红绿灯检测模式：只返回原始画面，由红绿灯模块处理
         if self.state == TRAFFIC_LIGHT_DETECTION:
             return OrchestratorResult(
                 annotated_image=bgr,
                 guidance_text="",
                 state="TRAFFIC_LIGHT_DETECTION",
-                extras={"mode": "红绿灯检测模式"}
+                extras={"mode": "红绿灯检测模式"},
             )
-        
+
         # 【新增】找物品模式：只返回原始画面，由yolomedia处理
         if self.state == ITEM_SEARCH:
             return OrchestratorResult(
                 annotated_image=bgr,
                 guidance_text="",
                 state="ITEM_SEARCH",
-                extras={"mode": "找物品模式", "prev_nav_state": self.prev_nav_state_before_search}
+                extras={
+                    "mode": "找物品模式",
+                    "prev_nav_state": self.prev_nav_state_before_search,
+                },
             )
 
         # 冷却期内允许继续输出画面，但避免"瞬时切换"
         in_cooldown = now < self.cooldown_until
 
         # 各状态处理
-        if self.state in (BLINDPATH_NAV, SEEKING_CROSSWALK, SEEKING_NEXT_BLINDPATH, RECOVERY):
+        if self.state in (
+            BLINDPATH_NAV,
+            SEEKING_CROSSWALK,
+            SEEKING_NEXT_BLINDPATH,
+            RECOVERY,
+        ):
             # —— 盲道侧 —— 统一调用盲道导航器
             try:
                 bres: BlindResult = self.blind.process_frame(bgr)
@@ -468,9 +608,13 @@ class NavigationMaster:
                 # 【移除】所有可视化干扰
                 # _draw_badge(ann_err, "NAV ERROR", (10, 28), fg="white", bg="red")
                 # _put_text(ann_err, str(e), (10, 56), color=(255,255,255), scale=0.55)
-                return OrchestratorResult(ann_err, self._say(now, ""), self.state, {"error": str(e)})
+                return OrchestratorResult(
+                    ann_err, self._say(now, ""), self.state, {"error": str(e)}
+                )
 
-            ann = bres.annotated_image if bres.annotated_image is not None else bgr.copy()
+            ann = (
+                bres.annotated_image if bres.annotated_image is not None else bgr.copy()
+            )
             say = bres.guidance_text or ""
 
             state_info = bres.state_info or {}
@@ -487,7 +631,10 @@ class NavigationMaster:
                 else:
                     self.cnt_crosswalk_seen = max(0, self.cnt_crosswalk_seen - 1)
 
-                if self.cnt_crosswalk_seen >= self.FRAMES_CROSS_SEEN and not in_cooldown:
+                if (
+                    self.cnt_crosswalk_seen >= self.FRAMES_CROSS_SEEN
+                    and not in_cooldown
+                ):
                     self.state = SEEKING_CROSSWALK
                     self.cooldown_until = now + self.COOLDOWN_SEC
                     say = "正在接近斑马线，为您对准方向。"
@@ -504,7 +651,10 @@ class NavigationMaster:
 
             # —— 对准阶段：同时利用 blind 内部 crosswalk_tracker 的角度与偏移（若提供）
             elif self.state == SEEKING_CROSSWALK:
-                aligned = (abs(angle) <= self.ANGLE_ALIGN_THR_DEG and abs(center_x_ratio - 0.5) <= self.OFFSET_ALIGN_THR)
+                aligned = (
+                    abs(angle) <= self.ANGLE_ALIGN_THR_DEG
+                    and abs(center_x_ratio - 0.5) <= self.OFFSET_ALIGN_THR
+                )
                 if cross_stage == "ready" and aligned:
                     self.cnt_align_ready += 1
                 else:
@@ -582,7 +732,16 @@ class NavigationMaster:
             #     ratio = 1.0 - min(1.0, remain / self.COOLDOWN_SEC)
             #     _draw_progress_bar(ann, ratio, pos=(10, 140), size=(160, 8), color="gray")
 
-            return OrchestratorResult(ann, self._say(now, say), self.state, {"source": "blind", "cross_stage": cross_stage, "blind_state": blind_state})
+            return OrchestratorResult(
+                ann,
+                self._say(now, say),
+                self.state,
+                {
+                    "source": "blind",
+                    "cross_stage": cross_stage,
+                    "blind_state": blind_state,
+                },
+            )
 
         if self.state == WAIT_TRAFFIC_LIGHT:
             ann = bgr.copy()
@@ -608,13 +767,11 @@ class NavigationMaster:
                 say = "绿灯稳定，开始通行。"
             else:
                 # 只在刚进入状态或每隔一段时间才播报
-                if not hasattr(self, '_last_wait_light_announce'):
+                if not hasattr(self, "_last_wait_light_announce"):
                     self._last_wait_light_announce = 0
                 if now - self._last_wait_light_announce > 5.0:  # 5秒播报一次
                     say = "正在等待绿灯…"
                     self._last_wait_light_announce = now
-
-
 
             # 【移除】冷却进度
             # if in_cooldown:
@@ -622,7 +779,9 @@ class NavigationMaster:
             #     ratio = 1.0 - min(1.0, remain / self.COOLDOWN_SEC)
             #     _draw_progress_bar(ann, ratio, pos=(10, 140), size=(160, 8), color="gray")
 
-            return OrchestratorResult(ann, self._say(now, say), self.state, {"traffic_light": major})
+            return OrchestratorResult(
+                ann, self._say(now, say), self.state, {"traffic_light": major}
+            )
 
         if self.state == CROSSING:
             try:
@@ -634,26 +793,33 @@ class NavigationMaster:
                 # 【移除】所有可视化干扰
                 # _draw_badge(ann_err, "CROSS ERROR", (10, 28), fg="white", bg="red")
                 # _put_text(ann_err, str(e), (10, 56), color=(255,255,255), scale=0.55)
-                return OrchestratorResult(ann_err, self._say(now, ""), self.state, {"error": str(e)})
+                return OrchestratorResult(
+                    ann_err, self._say(now, ""), self.state, {"error": str(e)}
+                )
 
-            ann = cres.annotated_image if cres.annotated_image is not None else bgr.copy()
+            ann = (
+                cres.annotated_image if cres.annotated_image is not None else bgr.copy()
+            )
             say = cres.guidance_text or ""
 
             # 新增：检查是否检测到盲道
-            blind_path_detected = getattr(cres, 'blind_path_detected', False)
-            blind_path_guidance = getattr(cres, 'blind_path_guidance', "")
-            
+            blind_path_detected = getattr(cres, "blind_path_detected", False)
+            blind_path_guidance = getattr(cres, "blind_path_guidance", "")
+
             # 如果检测到盲道且需要引导，优先处理盲道引导
             if blind_path_detected and blind_path_guidance:
                 # 如果应该切换到盲道导航（盲道很近），直接切换状态
-                if hasattr(cres, "should_switch_to_blindpath") and cres.should_switch_to_blindpath:
+                if (
+                    hasattr(cres, "should_switch_to_blindpath")
+                    and cres.should_switch_to_blindpath
+                ):
                     if not in_cooldown:
                         self.state = BLINDPATH_NAV
                         self.cooldown_until = now + self.COOLDOWN_SEC
                         say = "已到盲道跟前，切换到盲道导航。"  # 使用现有语音文件
                         self.cnt_cross_end = 0  # 重置计数器
                         # 重置盲道导航器状态
-                        if hasattr(self.blind, 'reset'):
+                        if hasattr(self.blind, "reset"):
                             self.blind.reset()
                 else:
                     # 盲道较远，继续过马路但给出盲道引导
@@ -668,7 +834,9 @@ class NavigationMaster:
             # if hasattr(cres, "should_switch_to_blindpath") and cres.should_switch_to_blindpath:
             #     end_hint = True
 
-            self.cnt_cross_end = self.cnt_cross_end + 1 if end_hint else max(0, self.cnt_cross_end - 1)
+            self.cnt_cross_end = (
+                self.cnt_cross_end + 1 if end_hint else max(0, self.cnt_cross_end - 1)
+            )
 
             if self.cnt_cross_end >= self.FRAMES_CROSS_END and not in_cooldown:
                 self.state = SEEKING_NEXT_BLINDPATH
@@ -688,7 +856,12 @@ class NavigationMaster:
             #     ratio = 1.0 - min(1.0, remain / self.COOLDOWN_SEC)
             #     _draw_progress_bar(ann, ratio, pos=(10, 140), size=(160, 8), color="gray")
 
-            return OrchestratorResult(ann, self._say(now, say), self.state, {"source": "cross", "end_cnt": self.cnt_cross_end})
+            return OrchestratorResult(
+                ann,
+                self._say(now, say),
+                self.state,
+                {"source": "cross", "end_cnt": self.cnt_cross_end},
+            )
 
         # 兜底
         ann = bgr.copy()
@@ -696,5 +869,3 @@ class NavigationMaster:
         # _draw_badge(ann, f"STATE: {self.state}", (10, 28), fg="white", bg="gray")
         # _draw_frame_border(ann, color=_color_bgr("gray"), thickness=2)
         return OrchestratorResult(ann, "", self.state, {})
-
-

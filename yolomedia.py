@@ -100,10 +100,18 @@ except Exception as e:
     _YOLOE_READY = False
     print(f"[DETECTOR] YOLOE backend not ready: {e}", flush=True)
 
-# ========= 路径参数（按需修改）=========
-YOLO_MODEL_PATH = r"C:\Users\Administrator\Desktop\rebuild1002\model\shoppingbest5.pt"
-HAND_TASK_PATH = (
-    r"C:\Users\Administrator\Desktop\rebuild1002\model\hand_landmarker.task"
+# ========= 路径参数（使用相对路径）========
+# 模型文件放在 ./model/ 目录下
+import os
+
+_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MODEL_DIR = os.path.join(_BASE_DIR, "model")
+
+YOLO_MODEL_PATH = os.environ.get(
+    "YOLOMEDIA_MODEL_PATH", os.path.join(MODEL_DIR, "shoppingbest5.pt")
+)
+HAND_TASK_PATH = os.environ.get(
+    "HAND_TASK_PATH", os.path.join(MODEL_DIR, "hand_landmarker.task")
 )
 
 # ========= 摄像头 =========
@@ -153,8 +161,9 @@ YOLO_CORRECTION_IOU_THRESHOLD = 0.2  # IoU阈值，越低越积极矫正
 YOLO_CORRECTION_CONF_THRESHOLD = 0.15  # 置信度阈值，越低检测越敏感
 
 # ========= 方向引导音频路径 =========
-AUDIO_DIR = (
-    r"E:\沙粒云\自媒体\2025视频制作\20250925AI眼镜\AI眼镜合并\audio"  # 请修改为实际路径
+AUDIO_DIR = os.environ.get(
+    "YOLOMEDIA_AUDIO_DIR",
+    os.path.join(_BASE_DIR, "audio"),  # 默认放在 ./audio/ 目录
 )
 AUDIO_FILES = {
     "向上": os.path.join(AUDIO_DIR, "up.wav"),
@@ -266,13 +275,21 @@ def _init_font():
         "/System/Library/Fonts/STHeiti Light.ttc",
         "/System/Library/Fonts/STHeiti Medium.ttc",
         "/Library/Fonts/Arial Unicode.ttf",
-        r"C:\\Windows\\Fonts\\msyh.ttc",
-        r"C:\\Windows\\Fonts\\msyh.ttf",
-        r"C:\\Windows\\Fonts\\simhei.ttf",
-        r"C:\\Windows\\Fonts\\simfang.ttf",
-        r"C:\\Windows\\Fonts\\simsun.ttc",
-        r"C:\\Windows\\Fonts\\simsunb.ttf",
+        "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+        "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
     ]
+    win_font_dir = os.environ.get("WINDIR", "C:\\Windows") + "\\Fonts"
+    candidates.extend(
+        [
+            os.path.join(win_font_dir, "msyh.ttc"),
+            os.path.join(win_font_dir, "msyh.ttf"),
+            os.path.join(win_font_dir, "simhei.ttf"),
+            os.path.join(win_font_dir, "simfang.ttf"),
+            os.path.join(win_font_dir, "simsun.ttc"),
+            os.path.join(win_font_dir, "simsunb.ttf"),
+        ]
+    )
     for p in candidates:
         if os.path.exists(p):
             _FONT_PATH = p
@@ -1002,6 +1019,16 @@ def main(headless: bool = False, prompt_name: str = None, stop_event=None):
                             )
                             cv2.drawContours(
                                 vis, [smoothed_contour], -1, (0, 255, 255), STROKE_WIDTH
+                            )
+                            x, y, w, h = cv2.boundingRect(smoothed_contour)
+                            cv2.rectangle(vis, (x, y), (x + w, y + h), (80, 255, 80), 2)
+                            draw_text_cn(
+                                vis,
+                                f"目标 {PROMPT_NAME}",
+                                (x, max(20, y - 10)),
+                                font_size=16,
+                                color=FRONTEND_COLORS["ok"],
+                                ui_hint=False,
                             )
 
                         # 记录 id，减少目标跳变

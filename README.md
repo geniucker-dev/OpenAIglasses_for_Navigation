@@ -345,6 +345,7 @@ uv run pio run --target upload
 - **状态面板**：当前模式、检测信息、FPS
 - **IMU 可视化**：设备姿态 3D 实时渲染
 - **语音识别结果**：显示识别的文字和 AI 回复
+- **调试输入框**：可直接向服务端发送文本指令，绕过 ASR 便于调试状态机与语音命令
 
 ### 实时传输端点
 
@@ -356,6 +357,7 @@ uv run pio run --target upload
 | `/ws_ui` | UI 状态推送 | Text 前缀消息 + JSON 片段 |
 | `/ws` | IMU 数据接收 | JSON |
 | `/stream.wav` | 音频下载流 | Binary (WAV) |
+| `/api/debug_text` | 调试文本指令输入 | JSON POST |
 
 ### 当前传输架构说明
 
@@ -369,8 +371,10 @@ uv run pio run --target upload
 ### 传输链路现状（2026-04）
 
 - 已修复 `wsAud` 的并发访问风险，并为 `/ws/viewer`、`/ws_ui` 增加自动重连。
+- 相机断线重连后，导航状态机会保留原有导航状态，不再因为 camera websocket 重连而被重置回默认状态。
 - 当前已确认：前端状态框抖动主要反映 **ESP32 ⇄ 服务端** 媒体链路波动，不是浏览器渲染瓶颈。
 - 当前仓库中音频上行仍是 **PCM over WebSocket**，**未使用 Opus**。
+- 过马路分割模型与红绿灯 YOLO 模型现在都会显式使用 `device_utils.DEVICE`；在 Apple Silicon + PyTorch MPS 可用时，会优先跑在 `mps` 上。
 - 面向 **ESP32 ⇄ 服务端** 的效果导向分析结论：
   - **视频上行**：若只看最终实时效果，优先考虑 **RTP/UDP**；若同时考虑 ESP32-S3 上的实现成熟度与工程自然度，**MJPEG/HTTP** 是最值得评估的替代方向。
   - **音频上行**：在 ESP32-S3 级别平台上，当前 PCM-over-WebSocket 仍是现实基线；若只看最终效果，带编解码与自适应能力的方案（如 WebRTC/Opus）理论上更优，但当前仓库未实现。
@@ -385,10 +389,14 @@ uv run pio run --target upload
 # 阿里云 API
 DASHSCOPE_API_KEY=sk-xxxxx
 
+# 设备选择（可选：cuda / mps / cpu）
+AIGLASS_DEVICE=mps
+
 # 模型路径（可选，使用默认路径可不配置）
 BLIND_PATH_MODEL=model/yolo-seg.pt
 OBSTACLE_MODEL=model/yoloe-11l-seg.pt
 YOLOE_MODEL_PATH=model/yoloe-11l-seg.pt
+TRAFFIC_LIGHT_MODEL=model/trafficlight.pt
 
 # 导航参数
 AIGLASS_MASK_MIN_AREA=1500      # 最小掩码面积
@@ -409,7 +417,14 @@ ENABLE_TTS=true                 # 启用语音播报
 BLIND_PATH_MODEL=/your/path/yolo-seg.pt
 OBSTACLE_MODEL=/your/path/yoloe-11l-seg.pt
 YOLOE_MODEL_PATH=/your/path/yoloe-11l-seg.pt
+TRAFFIC_LIGHT_MODEL=/your/path/trafficlight.pt
 ```
+
+### 语音映射回退
+
+- 默认会读取 `voice/map.zh-CN.json` 建立预录语音映射。
+- 如果映射文件缺失、损坏，或读出来为空，系统会回退为按 `voice/*.wav` 文件名建立基础映射。
+- 这意味着像 `红灯`、`绿灯`、`黄灯`、`已停止导航。` 这类与文件名一致的固定提示，在映射文件异常时仍可继续播放。
 
 ### 调整性能参数
 
@@ -449,6 +464,18 @@ if "新指令关键词" in user_text:
 # 修改 allowed_keywords 列表
 allowed_keywords = ["帮我看", "帮我找", "你的新关键词"]
 ```
+
+### 调试文本指令
+
+前端监控页提供调试输入框，也可以直接请求接口：
+
+```bash
+curl -X POST http://localhost:8081/api/debug_text \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"开始过马路"}'
+```
+
+适合在不接麦克风或不想等待 ASR 时直接验证状态切换、过马路流程和物品查找入口。
 
 ### 扩展导航功能
 

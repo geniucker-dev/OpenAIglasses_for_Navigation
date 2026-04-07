@@ -8,7 +8,10 @@
   const $finalList = document.getElementById('finalList');
   const $btnClear  = document.getElementById('btnClear');
   const $btnRe     = document.getElementById('btnReconnect');
+  const $btnToggleImu = document.getElementById('btnToggleImu');
   const $fps       = document.getElementById('fps');
+  const $debugText = document.getElementById('debugText');
+  const $btnDebugSend = document.getElementById('btnDebugSend');
   const canvas     = document.getElementById('canvas');
   const ctx        = canvas.getContext('2d');
 
@@ -230,15 +233,37 @@
     return { label, text: `${label} ${t}` };
   }
 
-  function fitCanvas(){
-    const rect = canvas.getBoundingClientRect();
-    const w = Math.max(320, Math.floor(rect.width));
-    const h = Math.max(240, Math.floor(rect.width * 3/4)); // 4:3
+  function resizeCanvas(){
+    const host = canvas.parentElement || canvas;
+    const rect = host.getBoundingClientRect();
+    const cssW = Math.max(1, Math.floor(rect.width));
+    const cssH = Math.max(1, Math.floor(rect.height));
+    const dpr = window.devicePixelRatio || 1;
+    const w = Math.max(1, Math.floor(cssW * dpr));
+    const h = Math.max(1, Math.floor(cssH * dpr));
     if (canvas.width !== w || canvas.height !== h) {
-      canvas.width = w; canvas.height = h;
+      canvas.width = w;
+      canvas.height = h;
     }
   }
-  window.addEventListener('resize', fitCanvas); fitCanvas();
+
+  function drawFramePreservingAspect(source, sourceWidth, sourceHeight){
+    resizeCanvas();
+    const destW = canvas.width;
+    const destH = canvas.height;
+    ctx.clearRect(0, 0, destW, destH);
+
+    const scale = Math.min(destW / sourceWidth, destH / sourceHeight);
+    const drawW = Math.max(1, Math.round(sourceWidth * scale));
+    const drawH = Math.max(1, Math.round(sourceHeight * scale));
+    const dx = Math.floor((destW - drawW) / 2);
+    const dy = Math.floor((destH - drawH) / 2);
+
+    ctx.drawImage(source, dx, dy, drawW, drawH);
+  }
+
+  window.addEventListener('resize', resizeCanvas);
+  resizeCanvas();
 
   let wsCam, wsUI, frames = 0, fpsTimer = 0, lastFrameAt = 0;
   let camReconnectTimer = 0;
@@ -274,13 +299,17 @@
     const blob = new Blob([buf], {type:'image/jpeg'});
     if ('createImageBitmap' in window){
       createImageBitmap(blob).then(bmp=>{
-        fitCanvas();
-        ctx.drawImage(bmp, 0, 0, canvas.width, canvas.height);
+        drawFramePreservingAspect(bmp, bmp.width, bmp.height);
+        if (typeof bmp.close === 'function') bmp.close();
       }).catch(()=>{});
     }else{
       const img = new Image();
-      img.onload = ()=>{ fitCanvas(); ctx.drawImage(img,0,0,canvas.width,canvas.height); URL.revokeObjectURL(img.src); };
-      img.src = URL.createObjectURL(blob);
+      const url = URL.createObjectURL(blob);
+      img.onload = ()=>{
+        drawFramePreservingAspect(img, img.naturalWidth || img.width, img.naturalHeight || img.height);
+        URL.revokeObjectURL(url);
+      };
+      img.src = url;
     }
     frames++;
     lastFrameAt = performance.now();
@@ -423,6 +452,44 @@
     connectCamera();
     connectASR();
   };
+
+  if ($btnToggleImu) {
+    $btnToggleImu.onclick = () => {
+      const imuFloat = document.querySelector('.imu-float');
+      if (imuFloat) {
+        imuFloat.classList.toggle('visible');
+        $btnToggleImu.textContent = imuFloat.classList.contains('visible') ? '隐藏IMU' : 'IMU';
+      }
+    };
+  }
+
+  if ($btnDebugSend && $debugText) {
+    $btnDebugSend.onclick = async () => {
+      const text = $debugText.value.trim();
+      if (!text) return;
+
+      try {
+        const resp = await fetch('/api/debug_text', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({text})
+        });
+        const data = await resp.json();
+        if (data.success) {
+          $debugText.value = '';
+        }
+      } catch (e) {
+        console.error('Debug send failed:', e);
+      }
+    };
+
+    $debugText.onkeydown = (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        $btnDebugSend.click();
+      }
+    };
+  }
 
   connectCamera();
   connectASR();
@@ -962,7 +1029,4 @@ import { GLTFLoader } from 'https://unpkg.com/three@0.155.0/examples/jsm/loaders
     }
   }, 500);
 
-  // 初次与窗口改变时，保持左右上下对齐
-  window.addEventListener('resize', resize);
-  resize();
 })();

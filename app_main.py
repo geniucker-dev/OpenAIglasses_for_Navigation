@@ -912,6 +912,17 @@ def health():
     return "OK"
 
 
+@app.post("/api/debug_text")
+async def debug_text(request: Request):
+    data = await request.json()
+    user_text = data.get("text", "").strip()
+    if not user_text:
+        return {"success": False, "error": "Empty text"}
+
+    await start_ai_with_text_custom(user_text)
+    return {"success": True, "text": user_text}
+
+
 # 注册 /stream.wav
 register_stream_route(app)
 
@@ -959,6 +970,8 @@ async def ws_audio(ws: WebSocket):
             keepalive_task.cancel()
             try:
                 await keepalive_task
+            except asyncio.CancelledError:
+                pass
             except Exception:
                 pass
         keepalive_task = None
@@ -1336,14 +1349,15 @@ async def ws_camera_esp(ws: WebSocket):
         print("[CAMERA] ESP32 disconnected")
         await broadcast_camera_status(force=True)
 
-        # 【新增】清理导航状态
-        if blind_path_navigator:
-            blind_path_navigator.reset()
-        if cross_street_navigator:
-            cross_street_navigator.reset()
         if orchestrator:
-            orchestrator.reset()
-            print("[NAV MASTER] 统领器已重置")
+            preserved_state = orchestrator.get_state()
+            orchestrator.reset_for_camera_reconnect()
+            print(f"[NAV MASTER] 相机重连重置完成，保留状态: {preserved_state}")
+        else:
+            if blind_path_navigator:
+                blind_path_navigator.reset()
+            if cross_street_navigator:
+                cross_street_navigator.reset()
 
 
 # ---------- WebSocket：浏览器订阅相机帧 ----------

@@ -64,3 +64,6 @@ htmlcov/
 
 # Misc
 mobileclip_blt.ts
+
+# Playwright MCP
+.playwright-mcp/

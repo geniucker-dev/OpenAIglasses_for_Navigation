@@ -108,6 +108,7 @@ ESP32 IMU
 | 服务端 → 浏览器视频 | `/ws/viewer` | WebSocket | JPEG |
 | 服务端 → 浏览器状态 | `/ws_ui` | WebSocket | 文本前缀协议 + JSON |
 | 服务端 → ESP32 音频 | `/stream.wav` | HTTP | WAV |
+| 浏览器 → 服务端调试文本 | `/api/debug_text` | HTTP POST | JSON |
 
 ## ⚠️ 当前传输链路结论（2026-04）
 
@@ -115,6 +116,8 @@ ESP32 IMU
 - camera 链路中，ESP32 侧连续发送失败 3 次会主动关闭 websocket 并重连。
 - audio 链路中，ESP32 侧重连或收到 `RESTART` 后会重新发送 `START`，因此服务端日志可能出现多次 `[AUDIO] START received`。
 - 当前仓库音频上行仍是 **裸 PCM**，**没有使用 Opus**。
+- 过马路分割与红绿灯 YOLO 路径都已显式接入 `device_utils.DEVICE`，在 Apple Silicon 上会优先尝试 MPS。
+- 相机 websocket 断线重连只重置瞬时计数器，不再把导航状态机强制打回默认状态。
 
 ## 🚀 启动与调试入口
 
@@ -137,6 +140,7 @@ uv run pio run --project-dir compile --target upload
 - 服务端：`app_main.py`
   - `ws_camera_esp()`
   - `ws_audio()`
+  - `/api/debug_text`
   - `get_camera_status_payload()`
   - `get_asr_status_payload()`
   - `camera_status_watchdog()`
@@ -151,3 +155,4 @@ uv run pio run --project-dir compile --target upload
   - `connectASR()`
   - `applyCameraStatus()`
   - `applyAsrStatus()`
+  - 调试输入框请求逻辑
