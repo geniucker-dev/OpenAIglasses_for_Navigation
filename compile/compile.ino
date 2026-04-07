@@ -80,6 +80,7 @@ WebsocketsClient wsAud;
 volatile bool cam_ws_ready = false;
 volatile bool aud_ws_ready = false;
 volatile bool snapshot_in_progress = false; // 抓拍期间暂停实时采集
+volatile bool snapshot_requested = false;   // 抓拍请求标志（由回调设置，loop执行）
 SemaphoreHandle_t cam_ws_mutex = nullptr;
 SemaphoreHandle_t aud_ws_mutex = nullptr;
 
@@ -751,20 +752,34 @@ void taskHttpPlay(void*){
   }
 
   cli.stop();
+  taskHttpPlayHandle = nullptr;  // 任务退出前清理 handle
+  http_play_running = false;
   vTaskDelete(nullptr);
 }
 
 void startStreamWav(){
   if (taskHttpPlayHandle) return;
+  http_play_running = false;  // 先确保旧状态清除
   xTaskCreatePinnedToCore(taskHttpPlay, "http_wav", 8192, nullptr, 2, &taskHttpPlayHandle, 0);
   Serial.println("[AUDIO] http_wav task started");
 }
+
 void stopStreamWav(){
   if (!taskHttpPlayHandle) return;
   http_play_running = false;
-  vTaskDelay(pdMS_TO_TICKS(50));
-  taskHttpPlayHandle = nullptr;
-  Serial.println("[AUDIO] http_wav task stopped");
+  // 等待任务真正退出（最多等待 2000ms，超过最长 HTTP 超时 1500ms）
+  int wait = 0;
+  while (taskHttpPlayHandle && wait < 2000) {
+    vTaskDelay(pdMS_TO_TICKS(10));
+    wait += 10;
+  }
+  if (taskHttpPlayHandle) {
+    // 超时仍未退出，强制清理
+    taskHttpPlayHandle = nullptr;
+    Serial.println("[AUDIO] http_wav task stop timeout");
+  } else {
+    Serial.println("[AUDIO] http_wav task stopped");
+  }
 }
 
 bool tryStartAudioStream(bool reset_queue = false){
@@ -789,11 +804,31 @@ bool tryStartAudioStream(bool reset_queue = false){
 // ====================================================================
 // TTS（二进制分片）保留但默认不启用
 // ====================================================================
+
+// 延迟初始化 qTTS（节省约 96KB RAM）
+static bool ensureQTTSCreated() {
+  if (qTTS) return true;
+  qTTS = xQueueCreate(TTS_QUEUE_DEPTH, sizeof(TTSChunk));
+  if (!qTTS) {
+    Serial.println("[TTS] queue create failed");
+    return false;
+  }
+  Serial.println("[TTS] queue created (96KB allocated)");
+  return true;
+}
+
 void taskTTSPlay(void*){
   static int32_t stereo32Buf[1024*2];
+  static TTSChunk ch;  // 改为 static 避免栈溢出（~2KB）
   for(;;){
     if (!tts_playing){ vTaskDelay(pdMS_TO_TICKS(5)); continue; }
-    TTSChunk ch;
+    
+    // 延迟创建队列
+    if (!qTTS && !ensureQTTSCreated()) {
+      tts_playing = false;
+      continue;
+    }
+    
     if (xQueueReceive(qTTS, &ch, pdMS_TO_TICKS(50)) == pdPASS){
       size_t inSamp  = ch.n / 2;
       int16_t* inPtr = (int16_t*)ch.data;
@@ -1020,9 +1055,10 @@ void setup() {
   init_i2s_in();
   init_i2s_out();
 
-  qFrames = xQueueCreate(3, sizeof(fb_ptr_t));  // 增加到3个缓冲，减少丢帧
+  qFrames = xQueueCreate(2, sizeof(fb_ptr_t));  // 与 FB_COUNT 匹配，避免 FB 过度占用
   qAudio  = xQueueCreate(AUDIO_QUEUE_DEPTH, sizeof(AudioChunk));
-  qTTS    = xQueueCreate(TTS_QUEUE_DEPTH, sizeof(TTSChunk));
+  // qTTS 延迟创建，节省 ~96KB RAM（仅在 TTS 模式启用时创建）
+  qTTS = nullptr;
   cam_ws_mutex = xSemaphoreCreateMutex();
   if (cam_ws_mutex == nullptr) {
     Serial.println("[WS-CAM] mutex create failed, reboot...");
@@ -1062,6 +1098,11 @@ void setup() {
       server_connected = false;
       cam_opened_at = 0;
       cam_consecutive_send_fail_count = 0;
+      // 先归还队列中所有 camera_fb_t*，避免泄漏
+      fb_ptr_t fb_to_free;
+      while (xQueueReceive(qFrames, &fb_to_free, 0) == pdPASS) {
+        if (fb_to_free) esp_camera_fb_return(fb_to_free);
+      }
       xQueueReset(qFrames);
       Serial.printf("[WS-CAM] closed (sent=%lu, dropped=%lu, fail=%lu)\\n", 
                     frame_sent_count, frame_dropped_count, ws_send_fail_count);
@@ -1094,35 +1135,9 @@ void setup() {
       }
 
       else if (cmd == "SNAP:HQ") {
-        Serial.println("[CAM] SNAP:HQ request");
-        if (snapshot_in_progress) return;
-        snapshot_in_progress = true;
-        sensor_t* s = esp_camera_sensor_get();
-        framesize_t old_fs = g_frame_size;
-        int old_q = JPEG_QUALITY;
-        // 目标分辨率：XGA（若需更高可改为 SXGA/UXGA，视PSRAM稳定性）
-        framesize_t target_fs = FRAMESIZE_SXGA;
-        if (s) {
-          s->set_framesize(s, target_fs);
-          s->set_quality(s, 18); // 数值越小越清晰
-        }
-        vTaskDelay(pdMS_TO_TICKS(500));
-        camera_fb_t* fb = esp_camera_fb_get();
-        if (fb && fb->format == PIXFORMAT_JPEG) {
-          wsCam.send("SNAP:BEGIN");
-          bool ok = wsCam.sendBinary((const char*)fb->buf, fb->len);
-          wsCam.send("SNAP:END");
-          if (!ok) { Serial.println("[CAM] SNAP send failed"); }
-          esp_camera_fb_return(fb);
-        } else {
-          if (fb) esp_camera_fb_return(fb);
-          Serial.println("[CAM] SNAP: capture failed");
-        }
-        if (s) {
-          s->set_framesize(s, old_fs);
-          s->set_quality(s, old_q);
-        }
-        snapshot_in_progress = false;
+        if (snapshot_in_progress || snapshot_requested) return;
+        snapshot_requested = true;
+        Serial.println("[CAM] SNAP:HQ requested");
       }
     }
   });
@@ -1218,6 +1233,48 @@ void loop() {
 
   if (aud_available && aud_start_pending && millis() - aud_last_start_attempt > AUD_START_RETRY_INTERVAL) {
     tryStartAudioStream();
+  }
+
+  // 处理高清抓拍请求（在 loop 中执行，避免回调持锁时间过长）
+  if (snapshot_requested && !snapshot_in_progress) {
+    snapshot_requested = false;
+    snapshot_in_progress = true;
+    
+    sensor_t* s = esp_camera_sensor_get();
+    framesize_t old_fs = g_frame_size;
+    int old_q = JPEG_QUALITY;
+    framesize_t target_fs = FRAMESIZE_SXGA;
+    
+    if (s) {
+      s->set_framesize(s, target_fs);
+      s->set_quality(s, 18);
+    }
+    vTaskDelay(pdMS_TO_TICKS(500));  // 等待传感器稳定
+    
+    camera_fb_t* fb = esp_camera_fb_get();
+    if (fb && fb->format == PIXFORMAT_JPEG) {
+      // 使用 mutex 保护 wsCam 操作
+      if (lock_cam_ws(pdMS_TO_TICKS(500))) {
+        wsCam.send("SNAP:BEGIN");
+        bool ok = wsCam.sendBinary((const char*)fb->buf, fb->len);
+        wsCam.send("SNAP:END");
+        unlock_cam_ws();
+        if (!ok) Serial.println("[CAM] SNAP send failed");
+      } else {
+        Serial.println("[CAM] SNAP mutex timeout");
+      }
+      esp_camera_fb_return(fb);
+    } else {
+      if (fb) esp_camera_fb_return(fb);
+      Serial.println("[CAM] SNAP capture failed");
+    }
+    
+    if (s) {
+      s->set_framesize(s, old_fs);
+      s->set_quality(s, old_q);
+    }
+    snapshot_in_progress = false;
+    Serial.println("[CAM] SNAP:HQ done");
   }
 
   if (lock_cam_ws(pdMS_TO_TICKS(20))) {
