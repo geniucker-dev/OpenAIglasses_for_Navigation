@@ -8,6 +8,7 @@
 #include "ESP_I2S.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
+#include "freertos/semphr.h"
 struct WavFmt;
 #include <cstring>      // memcmp
 #include <WiFiUdp.h>
@@ -44,6 +45,9 @@ volatile unsigned long frame_sent_count = 0;      // 发送帧计数
 volatile unsigned long frame_dropped_count = 0;   // 丢弃帧计数
 volatile unsigned long last_stats_time = 0;       // 上次统计时间
 volatile unsigned long ws_send_fail_count = 0;    // WebSocket发送失败计数
+volatile unsigned long cam_opened_at = 0;         // camera websocket 打开时间
+volatile unsigned long cam_consecutive_send_fail_count = 0; // 连续发送失败计数
+volatile unsigned long aud_consecutive_send_fail_count = 0; // 音频连续发送失败计数
 
 // ===== Mic (PDM RX) =====
 #define I2S_MIC_CLOCK_PIN 42
@@ -76,6 +80,8 @@ WebsocketsClient wsAud;
 volatile bool cam_ws_ready = false;
 volatile bool aud_ws_ready = false;
 volatile bool snapshot_in_progress = false; // 抓拍期间暂停实时采集
+SemaphoreHandle_t cam_ws_mutex = nullptr;
+SemaphoreHandle_t aud_ws_mutex = nullptr;
 
 typedef camera_fb_t* fb_ptr_t;
 QueueHandle_t qFrames;
@@ -94,6 +100,24 @@ volatile bool tts_playing = false;
 I2SClass i2sIn;   // PDM RX (Mic)
 I2SClass i2sOut;  // STD TX (Speaker)
 volatile bool run_audio_stream = false;
+volatile bool aud_start_pending = false;
+volatile unsigned long aud_last_start_attempt = 0;
+
+static inline bool lock_cam_ws(TickType_t timeout = pdMS_TO_TICKS(50)) {
+  return cam_ws_mutex != nullptr && xSemaphoreTake(cam_ws_mutex, timeout) == pdTRUE;
+}
+
+static inline void unlock_cam_ws() {
+  if (cam_ws_mutex != nullptr) xSemaphoreGive(cam_ws_mutex);
+}
+
+static inline bool lock_aud_ws(TickType_t timeout = pdMS_TO_TICKS(20)) {
+  return aud_ws_mutex != nullptr && xSemaphoreTake(aud_ws_mutex, timeout) == pdTRUE;
+}
+
+static inline void unlock_aud_ws() {
+  if (aud_ws_mutex != nullptr) xSemaphoreGive(aud_ws_mutex);
+}
 
 // ====================================================================
 // Camera
@@ -205,7 +229,6 @@ void taskCamCapture(void*) {
 void taskCamSend(void*) {
   static TickType_t lastTick = 0;
   unsigned long last_log = 0;
-  unsigned long send_timeout_count = 0;
   unsigned long last_sent_time = 0;
   
   for(;;){
@@ -221,24 +244,51 @@ void taskCamSend(void*) {
           lastTick = xTaskGetTickCount();
         }
         
+        bool ok = false;
+        bool ws_available_after_send = false;
         unsigned long send_start = millis();
-        bool ok = wsCam.sendBinary((const char*)fb->buf, fb->len);
-        unsigned long send_time = millis() - send_start;
+        unsigned long send_time = 0;
+        bool mutex_locked = false;
+        if (lock_cam_ws(pdMS_TO_TICKS(250))) {
+          mutex_locked = true;
+          ok = wsCam.sendBinary((const char*)fb->buf, fb->len);
+          send_time = millis() - send_start;
+          ws_available_after_send = wsCam.available();
+          unlock_cam_ws();
+        } else {
+          ws_send_fail_count++;
+          cam_consecutive_send_fail_count++;
+          Serial.println("[CAM-SEND] ERROR: cam ws mutex timeout");
+        }
         
         if (ok) {
           frame_sent_count++;
           last_sent_time = millis();
+          cam_consecutive_send_fail_count = 0;
+          if (frame_sent_count == 1) {
+            Serial.printf("[CAM-SEND] first frame sent (%u bytes, %lu ms)\n", fb->len, send_time);
+          }
           
           // 监控发送耗时
           if (send_time > 100) {
             Serial.printf("[CAM-SEND] WARNING: send took %lu ms (size=%u)\n", send_time, fb->len);
           }
         } else {
-          ws_send_fail_count++;
-          Serial.println("[CAM-SEND] ERROR: WebSocket send failed, closing...");
+          if (mutex_locked) {
+            ws_send_fail_count++;
+            cam_consecutive_send_fail_count++;
+          }
+          Serial.printf("[CAM-SEND] ERROR: WebSocket send failed (size=%u, available_after=%d, consecutive_fail=%lu)\n",
+                        fb->len, ws_available_after_send ? 1 : 0, cam_consecutive_send_fail_count);
           esp_camera_fb_return(fb);
-          wsCam.close(); 
-          cam_ws_ready = false;
+          if (cam_consecutive_send_fail_count >= 3) {
+            Serial.println("[CAM-SEND] ERROR: too many consecutive failures, closing websocket");
+            if (lock_cam_ws(pdMS_TO_TICKS(100))) {
+              wsCam.close();
+              unlock_cam_ws();
+            }
+            cam_ws_ready = false;
+          }
           continue;
         }
         
@@ -259,9 +309,13 @@ void taskCamSend(void*) {
     } else {
       // 队列接收超时，检查是否长时间没有帧
       unsigned long now = millis();
+      if (cam_ws_ready && frame_sent_count == 0 && cam_opened_at > 0 && (now - cam_opened_at) > 3000) {
+        int queue_waiting = uxQueueMessagesWaiting(qFrames);
+        Serial.printf("[CAM-SEND] WARNING: no first frame within %lu ms (captured=%lu, queue=%d, ws_fail=%lu)\n",
+                      now - cam_opened_at, frame_captured_count, queue_waiting, ws_send_fail_count);
+      }
       if (cam_ws_ready && last_sent_time > 0 && (now - last_sent_time) > 3000) {
         Serial.printf("[CAM-SEND] WARNING: No frame sent for %lu ms\n", now - last_sent_time);
-        send_timeout_count++;
       }
     }
   }
@@ -306,7 +360,26 @@ void taskMicUpload(void*){
     if (run_audio_stream && aud_ws_ready){
       AudioChunk ch;
       if (xQueueReceive(qAudio, &ch, pdMS_TO_TICKS(100)) == pdPASS){
-        wsAud.sendBinary((const char*)ch.data, ch.n);
+        bool ok = false;
+        if (lock_aud_ws(pdMS_TO_TICKS(30))) {
+          ok = wsAud.sendBinary((const char*)ch.data, ch.n);
+          unlock_aud_ws();
+        }
+        if (ok) {
+          aud_consecutive_send_fail_count = 0;
+        } else {
+          aud_consecutive_send_fail_count++;
+          if (aud_consecutive_send_fail_count >= 3) {
+            if (lock_aud_ws(pdMS_TO_TICKS(50))) {
+              wsAud.close();
+              unlock_aud_ws();
+            }
+            aud_ws_ready = false;
+            run_audio_stream = false;
+            xQueueReset(qAudio);
+            aud_consecutive_send_fail_count = 0;
+          }
+        }
       }
     } else {
       vTaskDelay(pdMS_TO_TICKS(10));
@@ -694,6 +767,25 @@ void stopStreamWav(){
   Serial.println("[AUDIO] http_wav task stopped");
 }
 
+bool tryStartAudioStream(bool reset_queue = false){
+  bool started = false;
+  if (reset_queue) xQueueReset(qAudio);
+  if (lock_aud_ws(pdMS_TO_TICKS(40))) {
+    if (wsAud.available()) {
+      started = wsAud.send("START");
+    }
+    unlock_aud_ws();
+  }
+  aud_last_start_attempt = millis();
+  run_audio_stream = started;
+  aud_start_pending = !started;
+  if (started) {
+    aud_consecutive_send_fail_count = 0;
+    startStreamWav();
+  }
+  return started;
+}
+
 // ====================================================================
 // TTS（二进制分片）保留但默认不启用
 // ====================================================================
@@ -931,6 +1023,18 @@ void setup() {
   qFrames = xQueueCreate(3, sizeof(fb_ptr_t));  // 增加到3个缓冲，减少丢帧
   qAudio  = xQueueCreate(AUDIO_QUEUE_DEPTH, sizeof(AudioChunk));
   qTTS    = xQueueCreate(TTS_QUEUE_DEPTH, sizeof(TTSChunk));
+  cam_ws_mutex = xSemaphoreCreateMutex();
+  if (cam_ws_mutex == nullptr) {
+    Serial.println("[WS-CAM] mutex create failed, reboot...");
+    delay(1500);
+    esp_restart();
+  }
+  aud_ws_mutex = xSemaphoreCreateMutex();
+  if (aud_ws_mutex == nullptr) {
+    Serial.println("[WS-AUD] mutex create failed, reboot...");
+    delay(1500);
+    esp_restart();
+  }
 
   xTaskCreatePinnedToCore(taskCamCapture, "cam_cap", 10240, NULL, 4, NULL, 1);
   xTaskCreatePinnedToCore(taskCamSend,    "cam_snd",  8192, NULL, 3, NULL, 1);
@@ -944,16 +1048,21 @@ void setup() {
     if (ev == WebsocketsEvent::ConnectionOpened)  { 
       cam_ws_ready = true;  
       server_connected = true;
+      cam_opened_at = millis();
       Serial.println("[WS-CAM] open");
       // 重置统计
       frame_sent_count = 0;
       frame_dropped_count = 0;
       ws_send_fail_count = 0;
+      cam_consecutive_send_fail_count = 0;
       last_stats_time = millis();
     }
     if (ev == WebsocketsEvent::ConnectionClosed)  { 
       cam_ws_ready = false; 
       server_connected = false;
+      cam_opened_at = 0;
+      cam_consecutive_send_fail_count = 0;
+      xQueueReset(qFrames);
       Serial.printf("[WS-CAM] closed (sent=%lu, dropped=%lu, fail=%lu)\\n", 
                     frame_sent_count, frame_dropped_count, ws_send_fail_count);
     }
@@ -1019,9 +1128,21 @@ void setup() {
   });
 
   wsAud.onEvent([](WebsocketsEvent ev, String){
-    if (ev == WebsocketsEvent::ConnectionOpened)  { aud_ws_ready = true;  Serial.println("[WS-AUD] open"); }
+    if (ev == WebsocketsEvent::ConnectionOpened)  {
+      aud_ws_ready = true;
+      run_audio_stream = false;
+      aud_start_pending = true;
+      aud_last_start_attempt = 0;
+      aud_consecutive_send_fail_count = 0;
+      Serial.println("[WS-AUD] open");
+    }
     if (ev == WebsocketsEvent::ConnectionClosed)  { 
       aud_ws_ready = false; 
+      run_audio_stream = false;
+      aud_start_pending = false;
+      aud_last_start_attempt = 0;
+      aud_consecutive_send_fail_count = 0;
+      xQueueReset(qAudio);
       Serial.println("[WS-AUD] closed"); 
       stopStreamWav();
     }
@@ -1031,8 +1152,11 @@ void setup() {
     if (msg.isText()){
       String s = msg.data(); s.trim();
       if (s == "RESTART"){
-        run_audio_stream = false; xQueueReset(qAudio); delay(50);
-        wsAud.send("START"); run_audio_stream = true;
+        run_audio_stream = false;
+        aud_start_pending = true;
+        aud_last_start_attempt = 0;
+        aud_consecutive_send_fail_count = 0;
+        xQueueReset(qAudio);
       }
     }
   });
@@ -1046,10 +1170,22 @@ void loop() {
   static unsigned long last_aud_retry = 0;
   const unsigned long CAM_RETRY_INTERVAL = 1000;
   const unsigned long AUD_RETRY_INTERVAL = 2000;
+  const unsigned long AUD_START_RETRY_INTERVAL = 800;
 
-  if (!wsCam.available()) {
+  bool cam_available = false;
+  if (lock_cam_ws(pdMS_TO_TICKS(20))) {
+    cam_available = wsCam.available();
+    unlock_cam_ws();
+  }
+
+  if (!cam_available) {
     if (millis() - last_cam_retry > CAM_RETRY_INTERVAL) {
-      if (wsCam.connect(SERVER_HOST, SERVER_PORT, CAM_WS_PATH)) {
+      bool cam_connected = false;
+      if (lock_cam_ws(pdMS_TO_TICKS(250))) {
+        cam_connected = wsCam.connect(SERVER_HOST, SERVER_PORT, CAM_WS_PATH);
+        unlock_cam_ws();
+      }
+      if (cam_connected) {
         Serial.println("[WS-CAM] connected");
       } else {
         Serial.println("[WS-CAM] retry...");
@@ -1058,13 +1194,21 @@ void loop() {
     }
   }
 
-  if (!wsAud.available()) {
+  bool aud_available = false;
+  if (lock_aud_ws(pdMS_TO_TICKS(10))) {
+    aud_available = wsAud.available();
+    unlock_aud_ws();
+  }
+
+  if (!aud_available) {
     if (millis() - last_aud_retry > AUD_RETRY_INTERVAL) {
-      if (wsAud.connect(SERVER_HOST, SERVER_PORT, AUD_WS_PATH)) {
+      bool aud_connected = false;
+      if (lock_aud_ws(pdMS_TO_TICKS(100))) {
+        aud_connected = wsAud.connect(SERVER_HOST, SERVER_PORT, AUD_WS_PATH);
+        unlock_aud_ws();
+      }
+      if (aud_connected) {
         Serial.println("[WS-AUD] connected");
-        run_audio_stream = true;
-        wsAud.send("START");
-        startStreamWav();   // /stream.wav (chunked)
       } else {
         Serial.println("[WS-AUD] retry...");
       }
@@ -1072,7 +1216,17 @@ void loop() {
     }
   }
 
-  wsCam.poll();
-  wsAud.poll();
+  if (aud_available && aud_start_pending && millis() - aud_last_start_attempt > AUD_START_RETRY_INTERVAL) {
+    tryStartAudioStream();
+  }
+
+  if (lock_cam_ws(pdMS_TO_TICKS(20))) {
+    wsCam.poll();
+    unlock_cam_ws();
+  }
+  if (lock_aud_ws(pdMS_TO_TICKS(10))) {
+    wsAud.poll();
+    unlock_aud_ws();
+  }
   delay(2);
 }

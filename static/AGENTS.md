@@ -38,3 +38,16 @@ static/
 | `/ws/viewer` | 视频流订阅 | Binary (JPEG) |
 | `/ws_ui` | UI状态推送 | JSON |
 | `/ws` | IMU数据 | JSON |
+
+## AUTO-RECONNECT
+
+- `/ws/viewer` 和 `/ws_ui` 断开后自动重连（延迟 1.2 秒）
+- 手动重连按钮 (`#btnReconnect`) 仍然保留，与自动重连互不冲突
+- 重连逻辑位于 `scheduleReconnect()` 函数
+- 使用 `camReconnectTimer` 和 `uiReconnectTimer` 避免重复重连
+
+## STATUS BADGES
+
+- `#camStatus` 与 `#asrStatus` 的文本和颜色都由 `static/main.js` 里的 `applyCameraStatus()` / `applyAsrStatus()` 更新。
+- 这两个 badge 主要跟随 `/ws_ui` 推送的 `CAMERA_STATUS:` 和 `ASR_STATUS:`，**不是**直接跟随视频帧本身。
+- 因此如果底层 ESP32 ⇄ 服务端媒体链路抖动，即使画面 FPS 看起来改善了，badge 仍可能在 `waiting/live` 之间跳动。

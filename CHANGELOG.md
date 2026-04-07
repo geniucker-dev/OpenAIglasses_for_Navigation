@@ -16,6 +16,11 @@
 ### 修改
 - 优化了 README 文档结构
 - 改进了代码注释
+- 更新 README/AGENTS/PROJECT_STRUCTURE，统一当前传输架构说明（WebSocket + HTTP + UDP 混合链路）
+- 记录 2026-04 的 ESP32 ⇄ 服务端传输链路复盘与协议评估结论
+
+### 修复
+- 标注文档中过时的安装方式与目录结构描述，改为当前仓库实际状态
 
 ## [1.0.0] - 2025-01-XX
 
@@ -87,4 +92,3 @@
 
 [未发布]: https://github.com/yourusername/aiglass/compare/v1.0.0...HEAD
 [1.0.0]: https://github.com/yourusername/aiglass/releases/tag/v1.0.0
-

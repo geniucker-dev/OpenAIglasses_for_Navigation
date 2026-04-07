@@ -241,6 +241,34 @@
   window.addEventListener('resize', fitCanvas); fitCanvas();
 
   let wsCam, wsUI, frames = 0, fpsTimer = 0, lastFrameAt = 0;
+  let camReconnectTimer = 0;
+  let uiReconnectTimer = 0;
+  let camConnectSeq = 0;
+  let uiConnectSeq = 0;
+
+  function scheduleReconnect(kind, fn, delay = 1200) {
+    const key = kind === 'camera' ? 'cam' : 'ui';
+    const current = key === 'cam' ? camReconnectTimer : uiReconnectTimer;
+    if (current) return;
+    const timer = window.setTimeout(() => {
+      if (key === 'cam') camReconnectTimer = 0;
+      else uiReconnectTimer = 0;
+      fn();
+    }, delay);
+    if (key === 'cam') camReconnectTimer = timer;
+    else uiReconnectTimer = timer;
+  }
+
+  function clearReconnectTimers() {
+    if (camReconnectTimer) {
+      clearTimeout(camReconnectTimer);
+      camReconnectTimer = 0;
+    }
+    if (uiReconnectTimer) {
+      clearTimeout(uiReconnectTimer);
+      uiReconnectTimer = 0;
+    }
+  }
 
   function drawBlob(buf){
     const blob = new Blob([buf], {type:'image/jpeg'});
@@ -267,24 +295,66 @@
   function connectCamera(){
     try{ if (wsCam) wsCam.close(); }catch(e){}
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    wsCam = new WebSocket(`${proto}://${location.host}/ws/viewer`);
+    const socket = new WebSocket(`${proto}://${location.host}/ws/viewer`);
+    const seq = ++camConnectSeq;
+    wsCam = socket;
     setBadge($camStatus, false, 'Camera: connecting…');
-    wsCam.binaryType = 'arraybuffer';
-    wsCam.onopen  = ()=> {};
-    wsCam.onclose = ()=> { setBadge($camStatus, false, 'Camera: disconnected'); $fps.textContent = 'FPS: 0'; frames = 0; fpsTimer = 0; lastFrameAt = 0; };
-    wsCam.onerror = ()=> { setBadge($camStatus, false, 'Camera: error'); $fps.textContent = 'FPS: 0'; frames = 0; fpsTimer = 0; lastFrameAt = 0; };
-    wsCam.onmessage = (ev)=> drawBlob(ev.data);
+    socket.binaryType = 'arraybuffer';
+    socket.onopen  = ()=> {
+      if (wsCam !== socket || seq !== camConnectSeq) return;
+      if (camReconnectTimer) {
+        clearTimeout(camReconnectTimer);
+        camReconnectTimer = 0;
+      }
+    };
+    socket.onclose = ()=> {
+      if (wsCam !== socket || seq !== camConnectSeq) return;
+      setBadge($camStatus, false, 'Camera: disconnected');
+      $fps.textContent = 'FPS: 0';
+      frames = 0;
+      fpsTimer = 0;
+      lastFrameAt = 0;
+      scheduleReconnect('camera', connectCamera);
+    };
+    socket.onerror = ()=> {
+      if (wsCam !== socket || seq !== camConnectSeq) return;
+      setBadge($camStatus, false, 'Camera: error');
+      $fps.textContent = 'FPS: 0';
+      frames = 0;
+      fpsTimer = 0;
+      lastFrameAt = 0;
+    };
+    socket.onmessage = (ev)=> {
+      if (wsCam !== socket || seq !== camConnectSeq) return;
+      drawBlob(ev.data);
+    };
   }
 
   function connectASR(){
     try{ if (wsUI) wsUI.close(); }catch(e){}
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    wsUI = new WebSocket(`${proto}://${location.host}/ws_ui`);
+    const socket = new WebSocket(`${proto}://${location.host}/ws_ui`);
+    const seq = ++uiConnectSeq;
+    wsUI = socket;
     setBadge($asrStatus, false, 'ASR: connecting…');
-    wsUI.onopen  = ()=> {};
-    wsUI.onclose = ()=> setBadge($asrStatus, false, 'ASR: disconnected');
-    wsUI.onerror = ()=> setBadge($asrStatus, false, 'ASR: error');
-    wsUI.onmessage = (ev)=>{
+    socket.onopen  = ()=> {
+      if (wsUI !== socket || seq !== uiConnectSeq) return;
+      if (uiReconnectTimer) {
+        clearTimeout(uiReconnectTimer);
+        uiReconnectTimer = 0;
+      }
+    };
+    socket.onclose = ()=> {
+      if (wsUI !== socket || seq !== uiConnectSeq) return;
+      setBadge($asrStatus, false, 'ASR: disconnected');
+      scheduleReconnect('ui', connectASR);
+    };
+    socket.onerror = ()=> {
+      if (wsUI !== socket || seq !== uiConnectSeq) return;
+      setBadge($asrStatus, false, 'ASR: error');
+    };
+    socket.onmessage = (ev)=>{
+      if (wsUI !== socket || seq !== uiConnectSeq) return;
       const s = ev.data || '';
       if (s.startsWith('INIT:')){
         try{
@@ -348,7 +418,11 @@
     messages.forEach(msg => msg.remove());
     lastTimestamp = 0; // 重置时间戳计数
   };
-  $btnRe.onclick    = ()=> { connectCamera(); connectASR(); };
+  $btnRe.onclick    = ()=> {
+    clearReconnectTimers();
+    connectCamera();
+    connectASR();
+  };
 
   connectCamera();
   connectASR();

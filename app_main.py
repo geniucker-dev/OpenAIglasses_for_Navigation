@@ -100,8 +100,10 @@ current_partial: str = ""
 recent_finals: List[str] = []
 RECENT_MAX = 50
 last_frames: Deque[Tuple[float, bytes]] = deque(maxlen=10)
-CAMERA_FRAME_STALE_SEC = 2.5
 AUDIO_FRAME_STALE_SEC = 2.0
+CAMERA_FRAME_STALE_SEC = 2.5
+CAMERA_FIRST_FRAME_TIMEOUT_SEC = 4.0
+CAMERA_SOCKET_GRACE_SEC = 6.0
 
 camera_viewers: Set[WebSocket] = set()
 esp32_camera_ws: Optional[WebSocket] = None
@@ -349,9 +351,12 @@ def get_camera_status_payload() -> Dict[str, Any]:
     ):
         state = "live"
         text = "Camera: live"
+    elif camera_last_frame_at <= 0:
+        state = "waiting"
+        text = "Camera: waiting for first frame"
     else:
         state = "waiting"
-        text = "Camera: waiting for frames"
+        text = "Camera: frame stream stalled"
 
     return {
         "state": state,
@@ -1160,6 +1165,10 @@ async def ws_camera_esp(ws: WebSocket):
             msg = await ws.receive()
             if "bytes" in msg and msg["bytes"] is not None:
                 data = msg["bytes"]
+                if camera_last_frame_at <= 0:
+                    print(
+                        f"[CAMERA] first frame received ({len(data)} bytes)", flush=True
+                    )
                 camera_last_frame_at = time.time()
                 await broadcast_camera_status()
                 frame_counter += 1
@@ -1603,6 +1612,36 @@ async def on_startup():
     async def camera_status_watchdog():
         while True:
             try:
+                now = time.time()
+                stale_camera_ws = esp32_camera_ws
+                if stale_camera_ws is not None:
+                    first_frame_overdue = (
+                        camera_last_frame_at <= 0
+                        and camera_connected_at > 0
+                        and (now - camera_connected_at) > CAMERA_FIRST_FRAME_TIMEOUT_SEC
+                    )
+                    stream_stalled = (
+                        camera_last_frame_at > 0
+                        and (now - camera_last_frame_at) > CAMERA_SOCKET_GRACE_SEC
+                    )
+                    if first_frame_overdue or stream_stalled:
+                        reason = (
+                            "no first frame"
+                            if first_frame_overdue
+                            else "frame stream stalled"
+                        )
+                        print(
+                            f"[CAMERA] closing stale websocket: {reason}",
+                            flush=True,
+                        )
+                        try:
+                            if stale_camera_ws.client_state == WebSocketState.CONNECTED:
+                                await stale_camera_ws.close(code=1011)
+                        except Exception as close_err:
+                            print(
+                                f"[CAMERA] stale close failed: {close_err}",
+                                flush=True,
+                            )
                 await broadcast_camera_status()
                 await broadcast_asr_status()
                 await asyncio.sleep(0.5)

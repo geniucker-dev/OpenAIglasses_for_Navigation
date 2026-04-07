@@ -177,3 +177,72 @@ uv run python test_recorder.py
   - 常亮 = 服务器已连接
 - **PlatformIO 平台**: `https://github.com/pioarduino/platform-espressif32.git`
 - 详细文档见 `compile/AGENTS.md`
+
+## RECENT FIXES
+
+### 2026-04-07: WebSocket 传输稳定性修复
+
+#### 问题描述
+ESP32 端的音频 WebSocket (`wsAud`) 存在与之前 camera 相同的并发访问风险，导致音频上传不稳定。同时，浏览器端的视频和状态 WebSocket 断开后不会自动重连，需要手动点击"重连"按钮。
+
+#### 根本原因
+1. **嵌入式端**: ArduinoWebsockets 库不是线程安全的，`wsAud` 被多个 FreeRTOS 任务/回调并发访问：
+   - `taskMicUpload()` 调用 `sendBinary()`
+   - `loop()` 调用 `connect()` 和 `poll()`
+   - `onMessage()` 回调中调用 `send("START")`
+   
+2. **前端**: `static/main.js` 中 `/ws/viewer` 和 `/ws_ui` 只在 `onclose` 时更新状态，没有重连逻辑。
+
+#### 解决方案
+
+**ESP32 固件 (`compile/compile.ino`)**:
+- 新增 `aud_ws_mutex` 互斥量，保护 `wsAud` 的所有访问
+- 音频发送失败后连续 3 次才触发重连，避免偶发失败导致频繁断开
+- 失败时自动重置 `qAudio` 队列，避免旧数据堆积
+- 连接成功后只有 `START` 真正发送成功才启动 `/stream.wav` 播放
+
+**浏览器前端 (`static/main.js`)**:
+- `/ws/viewer` 和 `/ws_ui` 断开后自动重连（延迟 1.2 秒）
+- 手动重连按钮仍然保留，与自动重连互不冲突
+- 重连逻辑轻量，不增加额外性能开销
+
+#### 关键代码位置
+- 嵌入式: `compile/compile.ino` 
+  - `aud_ws_mutex` (行 84)
+  - `lock_aud_ws()`, `unlock_aud_ws()` (行 112-118)
+  - `taskMicUpload()` (行 356-386)
+  - `loop()` 音频连接逻辑 (行 1167-1195)
+- 前端: `static/main.js`
+  - `scheduleReconnect()` (行 248-259)
+  - `connectCamera()` 重连逻辑 (行 306-312)
+  - `connectASR()` 重连逻辑 (行 335-338)
+
+#### 验证状态
+- [x] 固件编译成功 (RAM 23.1%, Flash 34.6%)
+- [x] 固件烧录成功
+- [ ] 待实测验证 ASR 稳定性和前端自动重连效果
+
+## RECENT ANALYSIS
+
+### 2026-04-07: ESP32 ⇄ 服务端传输链路复盘
+
+#### 已确认现状
+- 前端状态框（`waiting/live`）的跳变主要是**在显示底层真实传输波动**，不是前端自身渲染瓶颈。
+- 在当前使用场景里，浏览器与服务端基本同机，性能瓶颈优先怀疑 **ESP32 ⇄ 服务端** 链路，而不是浏览器 ⇄ 服务端。
+- 当前媒体链路是混合传输：
+  - 视频上行：`/ws/camera`（JPEG over WebSocket）
+  - 音频上行：`/ws_audio`（PCM16 over WebSocket）
+  - 音频下行：`/stream.wav`（HTTP WAV）
+  - IMU：UDP `12345`
+
+#### 根因排序（当前代码）
+1. `compile/compile.ino` 中 camera 上传在 `sendBinary()` 连续失败 3 次后会主动 `close()`，导致服务端反复看到相机断开再重连。
+2. `/ws_audio` 链路会在重连或 `RESTART` 后重复发送 `START`，所以日志中会出现多次 `[AUDIO] START received`。
+3. `app_main.py` 的状态 watchdog 每 0.5 秒重算一次 camera / asr 状态，前端 `static/main.js` 收到后立即刷新 badge，没有去抖，因此会放大底层抖动的可见性。
+
+#### 协议结论（仅限 ESP32 ⇄ 服务端）
+- **当前仓库未使用 Opus**；音频上行是 16kHz PCM16 单声道。
+- 若只看最终效果、不考虑实现复杂度，视频上行更偏向 **RTP/UDP**，音频上行更偏向带编解码与自适应能力的方案（如 **WebRTC/Opus**）。
+- 若同时考虑 **ESP32-S3** 平台成熟度与工程自然度，最值得额外评估的替代方向是：
+  - 视频上行：**MJPEG/HTTP**
+  - 音频上行：继续以 **WebSocket / PCM** 作为现实基线

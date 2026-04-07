@@ -52,7 +52,7 @@
 - **上下文感知**：在不同模式下智能过滤无关指令
 
 ### 📹 视频与音频处理
-- **实时视频流**：WebSocket 推流，支持多客户端同时观看
+- **实时视频流**：ESP32 以 JPEG 帧上传，服务端再分发到浏览器监控界面
 - **音视频同步录制**：自动保存带时间戳的录像和音频文件
 - **IMU 数据融合**：接收 ESP32 的 IMU 数据，支持姿态估计
 - **多路音频混音**：支持系统语音、AI 回复、环境音同时播放
@@ -73,13 +73,13 @@
   - 存储: 10GB 可用空间
 
 - **客户端设备**（可选）：
-  - ESP32-CAM 或其他支持 WebSocket 的摄像头
+  - Seeed Studio XIAO ESP32S3 Sense（推荐）或其他可运行同类固件的 ESP32-S3 设备
   - 麦克风（用于语音输入）
   - 扬声器/耳机（用于语音输出）
 
 ### 软件要求
 - **操作系统**: Windows 10/11, Linux (Ubuntu 20.04+), macOS 10.15+
-- **Python**: 3.9 - 3.11
+- **Python**: 3.11
 - **CUDA**: 11.8 或更高版本（GPU 加速必需）
 - **浏览器**: Chrome 90+, Firefox 88+, Edge 90+（用于 Web 监控）
 
@@ -94,27 +94,18 @@
 
 ```bash
 git clone https://github.com/yourusername/aiglass.git
-cd aiglass/rebuild1002
+cd aiglass
 ```
 
 ### 2. 安装依赖
 
-#### 创建虚拟环境（推荐）
+#### 使用 uv 安装依赖
 ```bash
-python -m venv venv
-# Windows
-venv\Scripts\activate
-# Linux/macOS
-source venv/bin/activate
+uv sync
 ```
 
-#### 安装 Python 包
-```bash
-pip install -r requirements.txt
-```
-
-#### 安装 CUDA 和 cuDNN（GPU 加速）
-请参考 [NVIDIA CUDA Toolkit 安装指南](https://developer.nvidia.com/cuda-downloads)
+#### 可选：CUDA 环境
+如需 NVIDIA GPU 加速，请参考 [NVIDIA CUDA Toolkit 安装指南](https://developer.nvidia.com/cuda-downloads)。
 
 ### 3. 下载模型文件
 
@@ -197,11 +188,11 @@ uv run pio run --target upload
 ┌─────────────────────────────────────────────────────────────┐
 │                        客户端层                              │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐      │
-│  │  ESP32-CAM   │  │   浏览器      │  │   移动端      │      │
-│  │  (视频/音频)  │  │  (监控界面)   │  │  (语音控制)   │      │
+│  │ XIAO ESP32S3 │  │   浏览器      │  │   移动端      │      │
+│  │ (视频/音频/IMU)│ │  (监控界面)   │  │  (语音控制)   │      │
 │  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘      │
 └─────────┼──────────────────┼──────────────────┼─────────────┘
-          │ WebSocket        │ HTTP/WS          │ WebSocket
+│ WS/HTTP/UDP      │ HTTP/WS          │ WebSocket
 ┌─────────┼──────────────────┼──────────────────┼─────────────┐
 │         │                  │                  │              │
 │    ┌────▼──────────────────▼──────────────────▼────────┐    │
@@ -261,7 +252,7 @@ uv run pio run --target upload
 
 | 模块 | 文件 | 功能 |
 |------|------|------|
-| **主应用** | `app_main.py` | FastAPI 服务、WebSocket 管理、状态协调 |
+| **主应用** | `app_main.py` | FastAPI 服务、传输路由、状态协调 |
 | **导航统领** | `navigation_master.py` | 状态机管理、模式切换、语音节流 |
 | **盲道导航** | `workflow_blindpath.py` | 盲道检测、避障、转弯引导 |
 | **过马路导航** | `workflow_crossstreet.py` | 斑马线检测、红绿灯识别、对齐引导 |
@@ -355,16 +346,34 @@ uv run pio run --target upload
 - **IMU 可视化**：设备姿态 3D 实时渲染
 - **语音识别结果**：显示识别的文字和 AI 回复
 
-### WebSocket 端点
+### 实时传输端点
 
 | 端点 | 用途 | 数据格式 |
 |------|------|---------|
 | `/ws/camera` | ESP32 相机推流 | Binary (JPEG) |
 | `/ws/viewer` | 浏览器订阅视频 | Binary (JPEG) |
 | `/ws_audio` | ESP32 音频上传 | Binary (PCM16) |
-| `/ws_ui` | UI 状态推送 | JSON |
+| `/ws_ui` | UI 状态推送 | Text 前缀消息 + JSON 片段 |
 | `/ws` | IMU 数据接收 | JSON |
 | `/stream.wav` | 音频下载流 | Binary (WAV) |
+
+### 当前传输架构说明
+
+- **ESP32 → 服务端视频**：`/ws/camera`，单条 WebSocket 上传 JPEG 帧
+- **ESP32 → 服务端音频**：`/ws_audio`，单条 WebSocket 上传 16kHz PCM16 单声道音频
+- **ESP32 → 服务端 IMU**：UDP `12345`
+- **服务端 → 浏览器视频**：`/ws/viewer`，JPEG 二进制帧
+- **服务端 → 浏览器状态**：`/ws_ui`，文本前缀协议（`INIT:`、`CAMERA_STATUS:`、`ASR_STATUS:`、`PARTIAL:`、`FINAL:`）
+- **服务端 → ESP32 音频下行**：`/stream.wav`，HTTP WAV 流
+
+### 传输链路现状（2026-04）
+
+- 已修复 `wsAud` 的并发访问风险，并为 `/ws/viewer`、`/ws_ui` 增加自动重连。
+- 当前已确认：前端状态框抖动主要反映 **ESP32 ⇄ 服务端** 媒体链路波动，不是浏览器渲染瓶颈。
+- 当前仓库中音频上行仍是 **PCM over WebSocket**，**未使用 Opus**。
+- 面向 **ESP32 ⇄ 服务端** 的效果导向分析结论：
+  - **视频上行**：若只看最终实时效果，优先考虑 **RTP/UDP**；若同时考虑 ESP32-S3 上的实现成熟度与工程自然度，**MJPEG/HTTP** 是最值得评估的替代方向。
+  - **音频上行**：在 ESP32-S3 级别平台上，当前 PCM-over-WebSocket 仍是现实基线；若只看最终效果，带编解码与自适应能力的方案（如 WebRTC/Opus）理论上更优，但当前仓库未实现。
 
 ## ⚙️ 配置说明
 
@@ -394,15 +403,12 @@ ENABLE_TTS=true                 # 启用语音播报
 
 ### 修改模型路径
 
-如果模型文件不在默认位置，可以在相应文件中修改：
+优先通过环境变量覆盖默认路径，而不是直接改源码：
 
-```python
-# workflow_blindpath.py
-seg_model_path = "your/custom/path/yolo-seg.pt"
-
-# yolomedia.py
-YOLO_MODEL_PATH = "your/custom/path/shoppingbest5.pt"
-HAND_TASK_PATH = "your/custom/path/hand_landmarker.task"
+```bash
+BLIND_PATH_MODEL=/your/path/yolo-seg.pt
+OBSTACLE_MODEL=/your/path/yoloe-11l-seg.pt
+YOLOE_MODEL_PATH=/your/path/yoloe-11l-seg.pt
 ```
 
 ### 调整性能参数
@@ -533,5 +539,3 @@ python test_recorder.py
 ## 📄 许可证
 
 本项目采用 MIT 许可证 - 详见 [LICENSE](LICENSE) 文件
-
-
