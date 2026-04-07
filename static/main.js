@@ -206,6 +206,20 @@
     el.className = 'badge ' + (ok? 'ok' : 'err');
   }
 
+  function isHealthyState(state) {
+    return state && !['disconnected', 'error'].includes(state);
+  }
+
+  function applyCameraStatus(camera) {
+    if (!camera || !camera.state) return;
+    setBadge($camStatus, isHealthyState(camera.state), camera.text || 'Camera: disconnected');
+  }
+
+  function applyAsrStatus(asr) {
+    if (!asr || !asr.state) return;
+    setBadge($asrStatus, isHealthyState(asr.state), asr.text || 'ASR: disconnected');
+  }
+
   function navLabelAndText(raw) {
     // 去掉前缀 “[导航] ”
     const t = raw.startsWith('[导航]') ? raw.substring(4).trim() : raw;
@@ -226,7 +240,7 @@
   }
   window.addEventListener('resize', fitCanvas); fitCanvas();
 
-  let wsCam, wsUI, frames = 0, fpsTimer = 0;
+  let wsCam, wsUI, frames = 0, fpsTimer = 0, lastFrameAt = 0;
 
   function drawBlob(buf){
     const blob = new Blob([buf], {type:'image/jpeg'});
@@ -241,6 +255,7 @@
       img.src = URL.createObjectURL(blob);
     }
     frames++;
+    lastFrameAt = performance.now();
     const now = performance.now();
     if (!fpsTimer) fpsTimer = now;
     if (now - fpsTimer >= 1000){
@@ -255,9 +270,9 @@
     wsCam = new WebSocket(`${proto}://${location.host}/ws/viewer`);
     setBadge($camStatus, false, 'Camera: connecting…');
     wsCam.binaryType = 'arraybuffer';
-    wsCam.onopen  = ()=> setBadge($camStatus, true, 'Camera: connected');
-    wsCam.onclose = ()=> setBadge($camStatus, false, 'Camera: disconnected');
-    wsCam.onerror = ()=> setBadge($camStatus, false, 'Camera: error');
+    wsCam.onopen  = ()=> {};
+    wsCam.onclose = ()=> { setBadge($camStatus, false, 'Camera: disconnected'); $fps.textContent = 'FPS: 0'; frames = 0; fpsTimer = 0; lastFrameAt = 0; };
+    wsCam.onerror = ()=> { setBadge($camStatus, false, 'Camera: error'); $fps.textContent = 'FPS: 0'; frames = 0; fpsTimer = 0; lastFrameAt = 0; };
     wsCam.onmessage = (ev)=> drawBlob(ev.data);
   }
 
@@ -266,7 +281,7 @@
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     wsUI = new WebSocket(`${proto}://${location.host}/ws_ui`);
     setBadge($asrStatus, false, 'ASR: connecting…');
-    wsUI.onopen  = ()=> setBadge($asrStatus, true, 'ASR: connected');
+    wsUI.onopen  = ()=> {};
     wsUI.onclose = ()=> setBadge($asrStatus, false, 'ASR: disconnected');
     wsUI.onerror = ()=> setBadge($asrStatus, false, 'ASR: error');
     wsUI.onmessage = (ev)=>{
@@ -275,6 +290,8 @@
         try{
           const data = JSON.parse(s.slice(5));
           $partial.textContent = data.partial || '（等待音频…）';
+          applyCameraStatus(data.camera);
+          applyAsrStatus(data.asr);
           
           // 初始化时加载历史消息（识别 [AI] 与 [导航]）
           if (data.finals && data.finals.length > 0) {
@@ -289,6 +306,18 @@
               }
             });
           }
+        }catch(e){}
+        return;
+      }
+      if (s.startsWith('CAMERA_STATUS:')){
+        try{
+          applyCameraStatus(JSON.parse(s.slice(14)));
+        }catch(e){}
+        return;
+      }
+      if (s.startsWith('ASR_STATUS:')){
+        try{
+          applyAsrStatus(JSON.parse(s.slice(11)));
         }catch(e){}
         return;
       }
@@ -323,6 +352,16 @@
 
   connectCamera();
   connectASR();
+
+  setInterval(() => {
+    const now = performance.now();
+    if (lastFrameAt && (now - lastFrameAt) > 1500) {
+      $fps.textContent = 'FPS: 0';
+      frames = 0;
+      fpsTimer = 0;
+      lastFrameAt = 0;
+    }
+  }, 500);
 })();
 
 
@@ -736,6 +775,7 @@ import { GLTFLoader } from 'https://unpkg.com/three@0.155.0/examples/jsm/loaders
   let lastGy = {x:0,y:0,z:0};
 
   const imu_ws_state = document.getElementById('imu_ws_state');
+  let lastImuMessageAt = 0;
   function setImuBadge(ok, text){
     imu_ws_state.textContent = text;
     imu_ws_state.className = 'badge ' + (ok? 'ok' : 'err');
@@ -743,11 +783,13 @@ import { GLTFLoader } from 'https://unpkg.com/three@0.155.0/examples/jsm/loaders
 
   const ws = new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws');
   setImuBadge(false, 'connecting…');
-  ws.onopen  = ()=> setImuBadge(true, 'connected');
-  ws.onclose = ()=> setImuBadge(false, 'disconnected');
-  ws.onerror = ()=> setImuBadge(false, 'error');
+  ws.onopen  = ()=> setImuBadge(true, 'IMU: connected, waiting for data…');
+  ws.onclose = ()=> { lastImuMessageAt = 0; setImuBadge(false, 'disconnected'); };
+  ws.onerror = ()=> { lastImuMessageAt = 0; setImuBadge(false, 'error'); };
   ws.onmessage = (ev)=>{
     try{
+      lastImuMessageAt = performance.now();
+      setImuBadge(true, 'IMU: live');
       const d = JSON.parse(ev.data);
       const t = (typeof d.ts==='number') ? d.ts : performance.now();
       let dt = (!lastTS || (t-lastTS)<=0 || (t-lastTS)>300) ? 0.02 : (t-lastTS)/1000;
@@ -838,6 +880,13 @@ import { GLTFLoader } from 'https://unpkg.com/three@0.155.0/examples/jsm/loaders
       updateDataPanel(R, P, Y, wx, wy, wz, ax, ay, az);
     } catch(e){}
   };
+
+  setInterval(() => {
+    if (ws.readyState === WebSocket.OPEN && lastImuMessageAt && (performance.now() - lastImuMessageAt) > 1500) {
+      setImuBadge(true, 'IMU: connected, waiting for data…');
+      lastImuMessageAt = 0;
+    }
+  }, 500);
 
   // 初次与窗口改变时，保持左右上下对齐
   window.addEventListener('resize', resize);

@@ -100,11 +100,20 @@ current_partial: str = ""
 recent_finals: List[str] = []
 RECENT_MAX = 50
 last_frames: Deque[Tuple[float, bytes]] = deque(maxlen=10)
+CAMERA_FRAME_STALE_SEC = 2.5
+AUDIO_FRAME_STALE_SEC = 2.0
 
 camera_viewers: Set[WebSocket] = set()
 esp32_camera_ws: Optional[WebSocket] = None
 imu_ws_clients: Set[WebSocket] = set()
 esp32_audio_ws: Optional[WebSocket] = None
+camera_connected_at: float = 0.0
+camera_last_frame_at: float = 0.0
+camera_status_cache: Optional[str] = None
+camera_status_task: Optional[asyncio.Task[Any]] = None
+esp32_audio_last_frame_at: float = 0.0
+asr_streaming_active: bool = False
+asr_status_cache: Optional[str] = None
 
 # 【新增】盲道导航相关全局变量
 blind_path_navigator = None
@@ -329,6 +338,82 @@ async def ui_broadcast_raw(msg: str):
         ui_clients.pop(k, None)
 
 
+def get_camera_status_payload() -> Dict[str, Any]:
+    now = time.time()
+    if esp32_camera_ws is None:
+        state = "disconnected"
+        text = "Camera: disconnected"
+    elif (
+        camera_last_frame_at > 0
+        and (now - camera_last_frame_at) <= CAMERA_FRAME_STALE_SEC
+    ):
+        state = "live"
+        text = "Camera: live"
+    else:
+        state = "waiting"
+        text = "Camera: waiting for frames"
+
+    return {
+        "state": state,
+        "text": text,
+        "socket_connected": esp32_camera_ws is not None,
+        "viewer_count": len(camera_viewers),
+        "last_frame_age_sec": None
+        if camera_last_frame_at <= 0
+        else max(0.0, round(now - camera_last_frame_at, 2)),
+    }
+
+
+async def broadcast_camera_status(force: bool = False):
+    global camera_status_cache
+    payload = get_camera_status_payload()
+    message = "CAMERA_STATUS:" + json.dumps(payload, ensure_ascii=False)
+    if not force and message == camera_status_cache:
+        return
+    camera_status_cache = message
+    await ui_broadcast_raw(message)
+
+
+def get_asr_status_payload() -> Dict[str, Any]:
+    now = time.time()
+    if esp32_audio_ws is None:
+        state = "disconnected"
+        text = "ASR: audio device disconnected"
+    elif (
+        asr_streaming_active
+        and esp32_audio_last_frame_at > 0
+        and (now - esp32_audio_last_frame_at) <= AUDIO_FRAME_STALE_SEC
+    ):
+        state = "live"
+        text = "ASR: listening"
+    elif asr_streaming_active:
+        state = "waiting"
+        text = "ASR: waiting for audio"
+    else:
+        state = "idle"
+        text = "ASR: device connected"
+
+    return {
+        "state": state,
+        "text": text,
+        "socket_connected": esp32_audio_ws is not None,
+        "streaming": asr_streaming_active,
+        "last_frame_age_sec": None
+        if esp32_audio_last_frame_at <= 0
+        else max(0.0, round(now - esp32_audio_last_frame_at, 2)),
+    }
+
+
+async def broadcast_asr_status(force: bool = False):
+    global asr_status_cache
+    payload = get_asr_status_payload()
+    message = "ASR_STATUS:" + json.dumps(payload, ensure_ascii=False)
+    if not force and message == asr_status_cache:
+        return
+    asr_status_cache = message
+    await ui_broadcast_raw(message)
+
+
 async def ui_broadcast_partial(text: str):
     global current_partial
     current_partial = text
@@ -364,6 +449,7 @@ async def full_system_reset(reason: str = ""):
     global current_partial, recent_finals
     current_partial = ""
     recent_finals = []
+    await ui_broadcast_partial("")
 
     # 4) 相机帧
     try:
@@ -831,7 +917,12 @@ async def ws_ui(ws: WebSocket):
     await ws.accept()
     ui_clients[id(ws)] = ws
     try:
-        init = {"partial": current_partial, "finals": recent_finals[-10:]}
+        init = {
+            "partial": current_partial,
+            "finals": recent_finals[-10:],
+            "camera": get_camera_status_payload(),
+            "asr": get_asr_status_payload(),
+        }
         await ws.send_text("INIT:" + json.dumps(init, ensure_ascii=False))
         while True:
             await asyncio.sleep(60)
@@ -844,16 +935,20 @@ async def ws_ui(ws: WebSocket):
 # ---------- WebSocket：ESP32 音频入口（ASR 上行） ----------
 @app.websocket("/ws_audio")
 async def ws_audio(ws: WebSocket):
-    global esp32_audio_ws
+    global esp32_audio_ws, esp32_audio_last_frame_at, asr_streaming_active
     esp32_audio_ws = ws
+    esp32_audio_last_frame_at = 0.0
+    asr_streaming_active = False
     await ws.accept()
     print("\n[AUDIO] client connected")
+    await broadcast_asr_status(force=True)
     recognition = None
     streaming = False
     last_ts = time.monotonic()
-    keepalive_task: Optional[asyncio.Task] = None
+    keepalive_task: Optional[asyncio.Task[Any]] = None
 
     async def stop_rec(send_notice: Optional[str] = None):
+        global asr_streaming_active
         nonlocal recognition, streaming, keepalive_task
         if keepalive_task and not keepalive_task.done():
             keepalive_task.cancel()
@@ -870,6 +965,9 @@ async def ws_audio(ws: WebSocket):
             recognition = None
         await set_current_recognition(None)
         streaming = False
+        asr_streaming_active = False
+        await ui_broadcast_partial("")
+        await broadcast_asr_status(force=True)
         if send_notice:
             try:
                 await ws.send_text(send_notice)
@@ -943,8 +1041,10 @@ async def ws_audio(ws: WebSocket):
                     recognition.start()
                     await set_current_recognition(recognition)
                     streaming = True
+                    asr_streaming_active = True
                     last_ts = time.monotonic()
                     keepalive_task = asyncio.create_task(keepalive_loop())
+                    await broadcast_asr_status(force=True)
                     await ui_broadcast_partial("（已开始接收音频…）")
                     await ws.send_text("OK:STARTED")
 
@@ -974,6 +1074,8 @@ async def ws_audio(ws: WebSocket):
                     try:
                         recognition.send_audio_frame(msg["bytes"])
                         last_ts = time.monotonic()
+                        esp32_audio_last_frame_at = time.time()
+                        await broadcast_asr_status()
                     except Exception:
                         await on_sdk_error("send_audio_frame failed")
 
@@ -988,6 +1090,10 @@ async def ws_audio(ws: WebSocket):
             pass
         if esp32_audio_ws is ws:
             esp32_audio_ws = None
+        esp32_audio_last_frame_at = 0.0
+        asr_streaming_active = False
+        await ui_broadcast_partial("")
+        await broadcast_asr_status(force=True)
         print("[WS] connection closed")
 
 
@@ -996,6 +1102,8 @@ async def ws_audio(ws: WebSocket):
 async def ws_camera_esp(ws: WebSocket):
     global \
         esp32_camera_ws, \
+        camera_connected_at, \
+        camera_last_frame_at, \
         blind_path_navigator, \
         cross_street_navigator, \
         cross_street_active, \
@@ -1005,8 +1113,11 @@ async def ws_camera_esp(ws: WebSocket):
         await ws.close(code=1013)
         return
     esp32_camera_ws = ws
+    camera_connected_at = time.time()
+    camera_last_frame_at = 0.0
     await ws.accept()
     print("[CAMERA] ESP32 connected")
+    await broadcast_camera_status(force=True)
 
     # 【新增】初始化盲道导航器
     if blind_path_navigator is None and yolo_seg_model is not None:
@@ -1049,6 +1160,8 @@ async def ws_camera_esp(ws: WebSocket):
             msg = await ws.receive()
             if "bytes" in msg and msg["bytes"] is not None:
                 data = msg["bytes"]
+                camera_last_frame_at = time.time()
+                await broadcast_camera_status()
                 frame_counter += 1
 
                 # 【新增】录制原始帧
@@ -1209,7 +1322,10 @@ async def ws_camera_esp(ws: WebSocket):
         except Exception:
             pass
         esp32_camera_ws = None
+        camera_connected_at = 0.0
+        camera_last_frame_at = 0.0
         print("[CAMERA] ESP32 disconnected")
+        await broadcast_camera_status(force=True)
 
         # 【新增】清理导航状态
         if blind_path_navigator:
@@ -1226,6 +1342,7 @@ async def ws_camera_esp(ws: WebSocket):
 async def ws_viewer(ws: WebSocket):
     await ws.accept()
     camera_viewers.add(ws)
+    await broadcast_camera_status(force=True)
     print(
         f"[VIEWER] Browser connected. Total viewers: {len(camera_viewers)}", flush=True
     )
@@ -1240,6 +1357,7 @@ async def ws_viewer(ws: WebSocket):
             camera_viewers.remove(ws)
         except Exception:
             pass
+        await broadcast_camera_status(force=True)
         print(f"[VIEWER] Removed. Total viewers: {len(camera_viewers)}", flush=True)
 
 
@@ -1480,6 +1598,21 @@ async def on_startup_init_audio():
 
 @app.on_event("startup")
 async def on_startup():
+    global camera_status_task
+
+    async def camera_status_watchdog():
+        while True:
+            try:
+                await broadcast_camera_status()
+                await broadcast_asr_status()
+                await asyncio.sleep(0.5)
+            except asyncio.CancelledError:
+                return
+            except Exception as e:
+                print(f"[CAMERA STATUS] watchdog error: {e}", flush=True)
+                await asyncio.sleep(1.0)
+
+    camera_status_task = asyncio.create_task(camera_status_watchdog())
     loop = asyncio.get_running_loop()
     await loop.create_datagram_endpoint(
         lambda: UDPProto(), local_addr=(UDP_IP, UDP_PORT)
@@ -1489,7 +1622,16 @@ async def on_startup():
 @app.on_event("shutdown")
 async def on_shutdown():
     """应用关闭时的清理工作"""
+    global camera_status_task
     print("[SHUTDOWN] 开始清理资源...")
+
+    if camera_status_task and not camera_status_task.done():
+        camera_status_task.cancel()
+        try:
+            await camera_status_task
+        except asyncio.CancelledError:
+            pass
+    camera_status_task = None
 
     # 停止YOLO媒体处理
     stop_yolomedia()

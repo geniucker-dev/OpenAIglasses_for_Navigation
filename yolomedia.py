@@ -20,7 +20,6 @@ import math
 import cv2
 import numpy as np
 import mediapipe as mp
-from mediapipe.framework.formats import landmark_pb2
 from ultralytics import YOLO
 from ultralytics.utils.plotting import Colors
 import bridge_io
@@ -179,7 +178,7 @@ BaseOptions = mp.tasks.BaseOptions
 VisionRunningMode = mp.tasks.vision.RunningMode
 HandLandmarker = mp.tasks.vision.HandLandmarker
 HandLandmarkerOptions = mp.tasks.vision.HandLandmarkerOptions
-HAND_CONNECTIONS = mp.solutions.hands.HAND_CONNECTIONS
+HAND_CONNECTIONS = mp.tasks.vision.HandLandmarksConnections.HAND_CONNECTIONS
 
 # ======== HandLandmarker 回调缓存 ========
 _last_result = None  # (result, timestamp_ms)
@@ -194,26 +193,14 @@ def on_result(
     _last_result = (result, timestamp_ms)
 
 
-def _to_proto(hand_lms) -> landmark_pb2.NormalizedLandmarkList:
-    proto = landmark_pb2.NormalizedLandmarkList()
-    proto.landmark.extend(
-        [landmark_pb2.NormalizedLandmark(x=p.x, y=p.y, z=p.z) for p in hand_lms]
-    )
-    return proto
-
-
 # —— 手骨架单色渲染 —— #
 def draw_hands_mono(img_bgr, hand_lms, color=(0, 255, 255), r=2, t=2):
-    mp_drawing = mp.solutions.drawing_utils
+    mp_drawing = mp.tasks.vision.drawing_utils
     landmark_spec = mp_drawing.DrawingSpec(color=color, thickness=-1, circle_radius=r)
     connection_spec = mp_drawing.DrawingSpec(color=color, thickness=t, circle_radius=r)
-    if hasattr(hand_lms, "landmark"):
-        proto = hand_lms
-    else:
-        proto = _to_proto(hand_lms)
     mp_drawing.draw_landmarks(
         img_bgr,
-        landmark_list=proto,
+        landmark_list=hand_lms,
         connections=HAND_CONNECTIONS,
         landmark_drawing_spec=landmark_spec,
         connection_drawing_spec=connection_spec,
