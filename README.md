@@ -143,7 +143,14 @@ DASHSCOPE_API_KEY=your_api_key_here
 API_KEY = "your_api_key_here"
 ```
 
-### 5. 启动系统
+### 5. 补充缺失的音频文件
+
+> **注意**：上游仓库缺少 `voice/黄灯.WAV` 文件，需手动创建：
+> ```bash
+> cp "voice/黄灯_原始.WAV" "voice/黄灯.WAV"
+> ```
+
+### 6. 启动系统
 
 ```bash
 python app_main.py
@@ -151,7 +158,7 @@ python app_main.py
 
 系统将在 `http://0.0.0.0:8081` 启动，打开浏览器访问即可看到实时监控界面。
 
-### 6. 连接设备（可选）
+### 7. 连接设备（可选）
 
 如果使用 ESP32-CAM，请：
 1. 烧录 `compile/compile.ino` 到 ESP32

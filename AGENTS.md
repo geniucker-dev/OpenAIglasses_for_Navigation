@@ -96,7 +96,6 @@
 
 ## ANTI-PATTERNS
 
-- 代码中存在Windows绝对路径硬编码 (`C:\Users\Administrator\...`)，**应使用环境变量或相对路径**
 - `workflow_blindpath.py:292` 有未完成的 `TODO` (YOLO红绿灯解析)，相邻有裸 `except` + `pass`
 
 ## UNIQUE STYLES
@@ -138,3 +137,8 @@ uv run python test_recorder.py
 - 需手动创建 `.env` 并设置 `DASHSCOPE_API_KEY`
 - 测试文件在 `PROJECT_STRUCTURE.md` 中文档化，但实际不在仓库中
 - 无CI/CD配置
+- **上游仓库缺少 `voice/黄灯.WAV`**：原仓库只有 `黄灯_原始.WAV`，需手动复制：
+  ```bash
+  cp "voice/黄灯_原始.WAV" "voice/黄灯.WAV"
+  ```
+  否则启动时会提示 `[AUDIO] 映射文件缺失: voice/黄灯.WAV`
