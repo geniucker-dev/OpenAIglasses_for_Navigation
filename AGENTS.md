@@ -174,6 +174,6 @@ uv run python test_recorder.py
 - **LED状态**: GPIO21 (LOW=ON)
   - 灭 = WiFi 未连接
   - 闪烁 = WiFi 已连接，等待服务器
-  - 灭 = 服务器已连接
+  - 常亮 = 服务器已连接
 - **PlatformIO 平台**: `https://github.com/pioarduino/platform-espressif32.git`
 - 详细文档见 `compile/AGENTS.md`

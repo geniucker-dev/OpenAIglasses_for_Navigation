@@ -185,7 +185,7 @@ uv run pio run --target upload
 |---------|------|
 | 灭 | WiFi 未连接 |
 | 闪烁 | WiFi 已连接，等待服务器 |
-| 灭 | 服务器已连接（正常工作） |
+| 常亮 | 服务器已连接（正常工作） |
 
 详细文档见 [compile/AGENTS.md](compile/AGENTS.md)
 

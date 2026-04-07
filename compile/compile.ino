@@ -864,6 +864,36 @@ void taskImuLoop(void*){
   }
 }
 
+// LED 状态任务 - 独立运行，不受 WebSocket 连接阻塞影响
+void taskLEDStatus(void*) {
+  const unsigned long BLINK_INTERVAL = 200; // 200ms 闪烁间隔
+  bool led_state = false;
+  unsigned long last_toggle = 0;
+  
+  while (true) {
+    unsigned long now = millis();
+    
+    if (server_connected) {
+      // 服务器已连接 → 常亮
+      digitalWrite(STATUS_LED_PIN, LOW);
+      led_state = true;
+    } else if (wifi_connected) {
+      // WiFi 已连接，等待服务器 → 闪烁
+      if (now - last_toggle >= BLINK_INTERVAL) {
+        led_state = !led_state;
+        digitalWrite(STATUS_LED_PIN, led_state ? LOW : HIGH);
+        last_toggle = now;
+      }
+    } else {
+      // WiFi 未连接 → 灭
+      digitalWrite(STATUS_LED_PIN, HIGH);
+      led_state = false;
+    }
+    
+    vTaskDelay(pdMS_TO_TICKS(10)); // 每 10ms 检查一次状态
+  }
+}
+
 // ====================================================================
 // Setup / Loop
 // ====================================================================
@@ -908,6 +938,7 @@ void setup() {
   xTaskCreatePinnedToCore(taskMicUpload,  "mic_upl",   4096, NULL, 2, NULL, 1);
   xTaskCreatePinnedToCore(taskImuLoop,    "imu_loop",  4096, NULL, 2, NULL, 0);
   xTaskCreatePinnedToCore(taskTTSPlay,    "tts_play",  4096, NULL, 2, NULL, 0);
+  xTaskCreatePinnedToCore(taskLEDStatus,  "led_stat",  2048, NULL, 1, NULL, 0);  // LED 状态任务
 
   wsCam.onEvent([](WebsocketsEvent ev, String){
     if (ev == WebsocketsEvent::ConnectionOpened)  { 
@@ -923,7 +954,6 @@ void setup() {
     if (ev == WebsocketsEvent::ConnectionClosed)  { 
       cam_ws_ready = false; 
       server_connected = false;
-      digitalWrite(STATUS_LED_PIN, LOW);  // LED ON = WiFi connected, waiting for server
       Serial.printf("[WS-CAM] closed (sent=%lu, dropped=%lu, fail=%lu)\\n", 
                     frame_sent_count, frame_dropped_count, ws_send_fail_count);
     }
@@ -1009,23 +1039,37 @@ void setup() {
 }
 
 void loop() {
+  // LED 由 taskLEDStatus 独立处理
+  
+  // 非阻塞重试
+  static unsigned long last_cam_retry = 0;
+  static unsigned long last_aud_retry = 0;
+  const unsigned long CAM_RETRY_INTERVAL = 1000;
+  const unsigned long AUD_RETRY_INTERVAL = 2000;
+
   if (!wsCam.available()) {
-    // Blink LED while waiting for server (WiFi connected)
-    digitalWrite(STATUS_LED_PIN, !digitalRead(STATUS_LED_PIN));
-    if (wsCam.connect(SERVER_HOST, SERVER_PORT, CAM_WS_PATH)) {
-      Serial.println("[WS-CAM] connected");
-      digitalWrite(STATUS_LED_PIN, HIGH);  // LED OFF = Server connected
-    } else { Serial.println("[WS-CAM] retry in 1s..."); delay(1000); }
+    if (millis() - last_cam_retry > CAM_RETRY_INTERVAL) {
+      if (wsCam.connect(SERVER_HOST, SERVER_PORT, CAM_WS_PATH)) {
+        Serial.println("[WS-CAM] connected");
+      } else {
+        Serial.println("[WS-CAM] retry...");
+      }
+      last_cam_retry = millis();
+    }
   }
 
   if (!wsAud.available()) {
-    if (wsAud.connect(SERVER_HOST, SERVER_PORT, AUD_WS_PATH)) {
-      Serial.println("[WS-AUD] connected");
-      delay(50);
-      run_audio_stream = true;
-      wsAud.send("START");
-      startStreamWav();   // /stream.wav (chunked)
-    } else { Serial.println("[WS-AUD] retry in 2s..."); delay(2000); }
+    if (millis() - last_aud_retry > AUD_RETRY_INTERVAL) {
+      if (wsAud.connect(SERVER_HOST, SERVER_PORT, AUD_WS_PATH)) {
+        Serial.println("[WS-AUD] connected");
+        run_audio_stream = true;
+        wsAud.send("START");
+        startStreamWav();   // /stream.wav (chunked)
+      } else {
+        Serial.println("[WS-AUD] retry...");
+      }
+      last_aud_retry = millis();
+    }
   }
 
   wsCam.poll();
