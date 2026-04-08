@@ -68,7 +68,7 @@
 ### 硬件要求
 - **开发/服务器端**：
   - CPU: Intel i5 或以上（推荐 i7/i9）
-  - GPU: NVIDIA GPU（支持 CUDA 11.8+，推荐 RTX 3060 或以上）
+  - GPU: 可选。NVIDIA GPU（CUDA）、Apple Silicon（MPS）或纯 CPU 均可运行；如需更高帧率，推荐 RTX 3060 或以上
   - 内存: 8GB RAM（推荐 16GB）
   - 存储: 10GB 可用空间
 
@@ -80,7 +80,7 @@
 ### 软件要求
 - **操作系统**: Windows 10/11, Linux (Ubuntu 20.04+), macOS 10.15+
 - **Python**: 3.11
-- **CUDA**: 11.8 或更高版本（GPU 加速必需）
+- **PyTorch 安装**: 推荐使用 `uv pip --torch-backend=auto` 自动选择 CPU / CUDA / ROCm；macOS 安装后运行时自动使用 MPS（若可用）
 - **浏览器**: Chrome 90+, Firefox 88+, Edge 90+（用于 Web 监控）
 
 ### API 密钥
@@ -99,13 +99,19 @@ cd aiglass
 
 ### 2. 安装依赖
 
-#### 使用 uv 安装依赖
+#### 推荐安装方式（PyTorch 自动选择后端）
 ```bash
 uv sync
+uv pip install --torch-backend=auto torch torchvision ultralytics "clip @ git+https://github.com/ultralytics/CLIP.git"
 ```
 
-#### 可选：CUDA 环境
-如需 NVIDIA GPU 加速，请参考 [NVIDIA CUDA Toolkit 安装指南](https://developer.nvidia.com/cuda-downloads)。
+说明：
+
+- 默认 `uv sync` 只同步项目核心依赖；PyTorch / Ultralytics / CLIP 这条机器学习栈需要单独安装，避免后续 `uv sync` 把已安装的 CUDA / ROCm / CPU 变体覆盖回通用 wheel。
+- `uv pip --torch-backend=auto` 会为当前机器自动选择合适的 PyTorch 安装来源（如 CPU / CUDA / ROCm）。
+- macOS / Apple Silicon 不存在单独的 “MPS wheel”；安装 macOS 版 PyTorch 后，程序运行时会自动检测并使用 `mps`。
+- 如需 NVIDIA GPU 加速，请先确保本机 CUDA 驱动环境正常，再执行上面的安装命令。
+- Linux 若安装 `pyaudio` 失败并提示缺少 `portaudio.h`，请先安装系统依赖，例如 Ubuntu / Debian 使用 `sudo apt install portaudio19-dev python3-dev`。
 
 ### 3. 下载模型文件
 

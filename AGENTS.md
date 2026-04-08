@@ -78,6 +78,7 @@
 - 使用 `uv` 管理 Python 环境和依赖
 - Python 版本: `3.11`
 - 虚拟环境: `.venv/` (uv 自动创建)
+- PyTorch / Ultralytics / CLIP 安装推荐使用 `uv pip --torch-backend=auto ...` 单独安装，不要再放进默认 `uv sync` 依赖图里
 
 ### 启动方式
 - **不用** `uvicorn module:app`，直接 `uv run python app_main.py`
@@ -102,6 +103,7 @@
 - 强制指定设备：设置环境变量 `AIGLASS_DEVICE=cuda` / `mps` / `cpu`
 - AMP 自动混合精度：CUDA 支持 bf16/fp16，MPS 支持 fp16
 - 配置文件: `device_utils.py`
+- 这里描述的是**运行时设备选择**；PyTorch 的安装推荐交给 `uv pip --torch-backend=auto` 处理
 
 ### 项目特定约定
 - 使用 `pyproject.toml` 管理依赖
@@ -131,6 +133,7 @@
 ```bash
 # 安装依赖
 uv sync
+uv pip install --torch-backend=auto torch torchvision ultralytics "clip @ git+https://github.com/ultralytics/CLIP.git"
 
 # 启动服务
 uv run python app_main.py
@@ -155,7 +158,9 @@ uv run python test_recorder.py
 
 ## NOTES
 
-- **GPU推荐**: CUDA 11.8+ (Linux/Windows)，macOS 使用 MPS 加速，无 GPU 则自动使用 CPU
+- **PyTorch 安装推荐**: 先 `uv sync` 同步核心依赖，再用 `uv pip install --torch-backend=auto torch torchvision ultralytics "clip @ git+https://github.com/ultralytics/CLIP.git"` 安装机器学习栈；这样后续 `uv sync` 不会把 GPU / CPU 变体冲回通用 wheel
+- **GPU推荐**: Linux/Windows 若追求更高帧率推荐 CUDA 11.8+；macOS 使用 MPS 加速；无 GPU 时自动使用 CPU
+- **Linux 音频构建依赖**: `pyaudio` 需要系统提供 `portaudio.h`；Ubuntu / Debian 可先安装 `portaudio19-dev` 与 `python3-dev`
 - 模型文件需从 ModelScope 下载: https://www.modelscope.cn/models/archifancy/AIGlasses_for_navigation
 - 需手动创建 `.env` 并设置 `DASHSCOPE_API_KEY`
 - 测试文件在 `PROJECT_STRUCTURE.md` 中文档化，但实际不在仓库中

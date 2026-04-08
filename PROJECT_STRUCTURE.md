@@ -125,8 +125,11 @@ ESP32 IMU
 
 ```bash
 uv sync
+uv pip install --torch-backend=auto torch torchvision ultralytics "clip @ git+https://github.com/ultralytics/CLIP.git"
 uv run python app_main.py
 ```
+
+说明：默认 `uv sync` 只同步核心依赖；`uv pip --torch-backend=auto` 用于单独安装 PyTorch / Ultralytics / CLIP 这条机器学习栈，避免后续同步把不同机器上的 CUDA / ROCm / CPU 变体覆盖回通用 wheel。macOS 上的 MPS 仍然是运行时自动选择。
 
 ### 固件
 

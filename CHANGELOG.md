@@ -19,6 +19,7 @@
 - 更新 README/AGENTS/PROJECT_STRUCTURE，统一当前传输架构说明（WebSocket + HTTP + UDP 混合链路）
 - 记录 2026-04 的 ESP32 ⇄ 服务端传输链路复盘与协议评估结论
 - 更新 README/AGENTS/static/AGENTS/PROJECT_STRUCTURE，补充调试输入框、MPS 推理、状态保留与语音映射回退说明
+- 安装文档改为：默认 `uv sync` 只同步核心依赖，PyTorch / Ultralytics / CLIP 改为用 `uv pip --torch-backend=auto` 单独安装
 
 ### 修复
 - 标注文档中过时的安装方式与目录结构描述，改为当前仓库实际状态
