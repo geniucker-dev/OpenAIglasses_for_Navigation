@@ -25,6 +25,7 @@ import numpy as np
 from obstacle_detector_client import ObstacleDetectorClient
 from device_utils import DEVICE, IS_CUDA
 from standard_yolo_backend import load_standard_yolo_model
+from yoloe_backend import YoloEBackend
 
 import mediapipe as mp
 import bridge_io
@@ -128,6 +129,42 @@ orchestrator = None  # 新增
 omni_conversation_active = False  # 标记omni对话是否正在进行
 omni_previous_nav_state = None  # 保存omni激活前的导航状态，用于恢复
 
+ESP32_DEFAULT_FRAME_WIDTH = 640
+ESP32_DEFAULT_FRAME_HEIGHT = 480
+YOLOE_WARMUP_IMGSZ = 640
+
+
+def build_yoloe_warmup_frame():
+    """Build a synthetic frame matching the default ESP32 stream shape."""
+    frame = np.zeros(
+        (ESP32_DEFAULT_FRAME_HEIGHT, ESP32_DEFAULT_FRAME_WIDTH, 3), dtype=np.uint8
+    )
+    cv2.rectangle(frame, (220, 120), (420, 360), (255, 255, 255), -1)
+    cv2.circle(frame, (320, 240), 60, (0, 200, 255), -1)
+    return frame
+
+
+def warmup_item_search_yoloe(model_path: str):
+    """Preheat the item-search YOLOE track path before first live use."""
+    print("[NAVIGATION] 开始预热 YOLO-E 找物路径...")
+    try:
+        warmup_backend = YoloEBackend(model_path=model_path)
+        warmup_backend.set_text_classes(["bottle"])
+        warmup_frame = build_yoloe_warmup_frame()
+        _ = warmup_backend.segment(
+            warmup_frame,
+            conf=0.20,
+            iou=0.45,
+            imgsz=YOLOE_WARMUP_IMGSZ,
+            persist=True,
+        )
+        print(
+            "[NAVIGATION] YOLO-E 找物路径预热完成 "
+            f"({ESP32_DEFAULT_FRAME_WIDTH}x{ESP32_DEFAULT_FRAME_HEIGHT}, imgsz={YOLOE_WARMUP_IMGSZ})"
+        )
+    except Exception as e:
+        print(f"[NAVIGATION] YOLO-E 找物路径预热失败: {e}")
+
 
 # 【新增】模型加载函数
 def load_navigation_models():
@@ -210,9 +247,7 @@ def load_navigation_models():
                 # 测试障碍物检测功能
                 print(f"[NAVIGATION] 开始测试 YOLO-E 检测功能...")
                 try:
-                    test_img = np.zeros((640, 640, 3), dtype=np.uint8)
-                    # 在测试图像中画一个白色矩形，模拟一个物体
-                    cv2.rectangle(test_img, (200, 200), (400, 400), (255, 255, 255), -1)
+                    test_img = build_yoloe_warmup_frame()
 
                     # 测试检测（不提供 path_mask）
                     test_results = obstacle_detector.detect(test_img)
@@ -232,6 +267,8 @@ def load_navigation_models():
                     import traceback
 
                     traceback.print_exc()
+
+                warmup_item_search_yoloe(obstacle_model_path)
 
                 print(f"[NAVIGATION] ========== YOLO-E 障碍物检测器加载完成 ==========")
 

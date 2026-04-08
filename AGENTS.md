@@ -141,7 +141,7 @@
 ```bash
 # 安装依赖
 uv sync
-uv pip install --torch-backend=auto torch torchvision ultralytics "clip @ git+https://github.com/ultralytics/CLIP.git"
+uv pip install --torch-backend=auto torch torchvision ultralytics "clip @ git+https://github.com/ultralytics/CLIP.git" pnnx
 
 # 将普通 YOLO 从 .pt 导出为 NCNN 目录
 uv run yolo export model=model/yolo-seg.pt format=ncnn imgsz=640

@@ -125,7 +125,7 @@ ESP32 IMU
 
 ```bash
 uv sync
-uv pip install --torch-backend=auto torch torchvision ultralytics "clip @ git+https://github.com/ultralytics/CLIP.git"
+uv pip install --torch-backend=auto torch torchvision ultralytics "clip @ git+https://github.com/ultralytics/CLIP.git" pnnx
 uv run yolo export model=model/yolo-seg.pt format=ncnn imgsz=640
 uv run yolo export model=model/trafficlight.pt format=ncnn imgsz=640
 uv run python app_main.py

@@ -102,7 +102,7 @@ cd aiglass
 #### 推荐安装方式（uv + PyTorch 自动选择后端）
 ```bash
 uv sync
-uv pip install --torch-backend=auto torch torchvision ultralytics "clip @ git+https://github.com/ultralytics/CLIP.git"
+uv pip install --torch-backend=auto torch torchvision ultralytics "clip @ git+https://github.com/ultralytics/CLIP.git" pnnx
 ```
 
 说明：
@@ -462,7 +462,7 @@ TRAFFIC_LIGHT_MODEL=model/trafficlight_ncnn_model
 
 ```bash
 uv sync
-uv pip install --torch-backend=auto torch torchvision ultralytics "clip @ git+https://github.com/ultralytics/CLIP.git"
+uv pip install --torch-backend=auto torch torchvision ultralytics "clip @ git+https://github.com/ultralytics/CLIP.git" pnnx
 ```
 
 然后只转换普通 YOLO：
