@@ -15,7 +15,6 @@ from workflow_blindpath import BlindPathNavigator
 
 # 新增：导入过马路导航器
 from workflow_crossstreet import CrossStreetNavigator
-import torch
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
@@ -23,12 +22,9 @@ from starlette.websockets import WebSocketState
 import uvicorn
 import cv2
 import numpy as np
-from ultralytics import YOLO
 from obstacle_detector_client import ObstacleDetectorClient
 from device_utils import DEVICE, IS_CUDA
-
-import torch  # 添加这行
-
+from standard_yolo_backend import load_standard_yolo_model
 
 import mediapipe as mp
 import bridge_io
@@ -139,19 +135,21 @@ def load_navigation_models():
     global yolo_seg_model, obstacle_detector
 
     try:
-        seg_model_path = os.getenv("BLIND_PATH_MODEL", "model/yolo-seg.pt")
+        seg_model_path = os.getenv("BLIND_PATH_MODEL", "model/yolo-seg_ncnn_model")
 
         if os.path.exists(seg_model_path):
             print(f"[NAVIGATION] 模型文件存在，开始加载...")
-            yolo_seg_model = YOLO(seg_model_path)
-            yolo_seg_model.to(DEVICE)
-            print(f"[NAVIGATION] 盲道分割模型加载成功，设备: {DEVICE}")
+            yolo_seg_model = load_standard_yolo_model(seg_model_path, task="segment")
+            backend_name = getattr(yolo_seg_model, "backend", "torch")
+            print(
+                f"[NAVIGATION] 盲道分割模型加载成功，后端: {backend_name}"
+                + (f", 设备: {DEVICE}" if backend_name == "torch" else "")
+            )
 
             try:
                 test_img = np.zeros((640, 640, 3), dtype=np.uint8)
                 results = yolo_seg_model.predict(
                     test_img,
-                    device=DEVICE,
                     verbose=False,
                 )
                 print(

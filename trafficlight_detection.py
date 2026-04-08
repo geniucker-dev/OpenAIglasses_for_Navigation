@@ -10,16 +10,16 @@ import time
 import threading
 import cv2
 import numpy as np
-from ultralytics import YOLO
 import bridge_io
 from audio_player import play_voice_text  # 使用统一的语音播放接口
 import logging
 from device_utils import DEVICE
+from standard_yolo_backend import load_standard_yolo_model
 
 logger = logging.getLogger(__name__)
 
 # ========= 配置参数 =========
-YOLO_MODEL_PATH = os.getenv("TRAFFIC_LIGHT_MODEL", "model/trafficlight.pt")
+YOLO_MODEL_PATH = os.getenv("TRAFFIC_LIGHT_MODEL", "model/trafficlight_ncnn_model")
 
 # ========= 显示参数 =========
 CONF_THRESHOLD = 0.25  # 置信度阈值
@@ -225,9 +225,12 @@ def main(headless: bool = True, stop_event=None):
 
     print("[TRAFFIC] 加载 YOLO 红绿灯检测模型...")
     try:
-        model = YOLO(YOLO_MODEL_PATH)
-        model.to(DEVICE)
-        print(f"[TRAFFIC] 模型加载成功: {YOLO_MODEL_PATH}, 设备: {DEVICE}")
+        model = load_standard_yolo_model(YOLO_MODEL_PATH, task="detect")
+        backend_name = getattr(model, "backend", "torch")
+        print(
+            f"[TRAFFIC] 模型加载成功: {YOLO_MODEL_PATH}, 后端: {backend_name}"
+            + (f", 设备: {DEVICE}" if backend_name == "torch" else "")
+        )
     except Exception as e:
         print(f"[TRAFFIC] 模型加载失败: {e}")
         return
@@ -538,9 +541,12 @@ def init_model():
 
     try:
         print("[TRAFFIC] 加载 YOLO 红绿灯检测模型...")
-        _model = YOLO(YOLO_MODEL_PATH)
-        _model.to(DEVICE)
-        print(f"[TRAFFIC] 模型加载成功: {YOLO_MODEL_PATH}, 设备: {DEVICE}")
+        _model = load_standard_yolo_model(YOLO_MODEL_PATH, task="detect")
+        backend_name = getattr(_model, "backend", "torch")
+        print(
+            f"[TRAFFIC] 模型加载成功: {YOLO_MODEL_PATH}, 后端: {backend_name}"
+            + (f", 设备: {DEVICE}" if backend_name == "torch" else "")
+        )
         class_names = _model.names if hasattr(_model, "names") else {}
         print(f"[TRAFFIC] 模型类别: {class_names}")
         return True
@@ -568,7 +574,7 @@ def process_single_frame(image: np.ndarray, ui_broadcast_callback=None) -> dict:
     t_now = time.time()
 
     # YOLO推理
-    results = _model(image, conf=CONF_THRESHOLD, verbose=False)
+    results = _model.predict(image, conf=CONF_THRESHOLD, verbose=False)
 
     # 处理检测结果
     detected_light = None

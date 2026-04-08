@@ -399,10 +399,10 @@ DASHSCOPE_API_KEY=sk-xxxxx
 AIGLASS_DEVICE=mps
 
 # 模型路径（可选，使用默认路径可不配置）
-BLIND_PATH_MODEL=model/yolo-seg.pt
+BLIND_PATH_MODEL=model/yolo-seg_ncnn_model
 OBSTACLE_MODEL=model/yoloe-11l-seg.pt
 YOLOE_MODEL_PATH=model/yoloe-11l-seg.pt
-TRAFFIC_LIGHT_MODEL=model/trafficlight.pt
+TRAFFIC_LIGHT_MODEL=model/trafficlight_ncnn_model
 
 # 导航参数
 AIGLASS_MASK_MIN_AREA=1500      # 最小掩码面积
@@ -425,6 +425,72 @@ OBSTACLE_MODEL=/your/path/yoloe-11l-seg.pt
 YOLOE_MODEL_PATH=/your/path/yoloe-11l-seg.pt
 TRAFFIC_LIGHT_MODEL=/your/path/trafficlight.pt
 ```
+
+如果你已经把普通 YOLO 模型导出成 NCNN，可直接把路径改成导出的目录（通常以 `_ncnn_model` 结尾）：
+
+```bash
+BLIND_PATH_MODEL=model/yolo-seg_ncnn_model
+TRAFFIC_LIGHT_MODEL=model/trafficlight_ncnn_model
+```
+
+说明：
+
+- 现在仓库里的 **普通 YOLO**（如盲道分割、红绿灯检测）会按模型路径自动选择 `torch` 或 `ncnn`。
+- **YOLOE 仍保持 PyTorch 路径**，继续使用 `OBSTACLE_MODEL` / `YOLOE_MODEL_PATH` 指向 `.pt` 模型。
+- 如需强制普通 YOLO 的运行后端，可设置 `AIGLASS_STD_YOLO_BACKEND=torch` 或 `AIGLASS_STD_YOLO_BACKEND=ncnn`。
+
+### 使用 pnnx / NCNN 导出普通 YOLO
+
+本仓库运行时要求 NCNN 模型以 **Ultralytics 导出的 `_ncnn_model` 目录** 形式存在，这样 `standard_yolo_backend.py` 才能直接用 `YOLO("..._ncnn_model")` 加载。
+
+虽然 NCNN 官方文档推荐 PyTorch 模型优先走 **pnnx** 工具链，但在这个仓库里，最稳妥的方式是通过 Ultralytics 的 `format="ncnn"` 导出入口来生成兼容目录；这条路径底层就是面向 NCNN/pnnx 的导出流程，同时能保留当前代码已经适配好的目录结构。
+
+参考：
+
+- NCNN 官方说明：<https://github.com/tencent/ncnn/wiki/use-ncnn-with-pytorch-or-onnx>
+- pnnx README：<https://github.com/Tencent/ncnn/tree/master/tools/pnnx>
+
+只转换普通 YOLO：
+
+- `model/yolo-seg.pt` → 盲道 / 斑马线分割
+- `model/trafficlight.pt` → 红绿灯检测
+
+**不要转换 YOLOE**：
+
+- `model/yoloe-11l-seg.pt`
+- `OBSTACLE_MODEL`
+- `YOLOE_MODEL_PATH`
+
+可以直接用命令行导出，不需要额外写仓库脚本。
+
+如果你更关心**和当前运行时完全兼容的目录结构**，最直接的命令行方式是用 Ultralytics 自带的 NCNN 导出入口；它底层会调用 NCNN / pnnx 工具链，并直接生成本仓库可用的 `_ncnn_model` 目录：
+
+```bash
+uv run yolo export model=model/yolo-seg.pt format=ncnn imgsz=640
+uv run yolo export model=model/trafficlight.pt format=ncnn imgsz=640
+```
+
+导出成功后通常会得到类似目录：
+
+```bash
+model/yolo-seg_ncnn_model
+model/trafficlight_ncnn_model
+```
+
+然后把环境变量切到这些目录：
+
+```bash
+BLIND_PATH_MODEL=model/yolo-seg_ncnn_model
+TRAFFIC_LIGHT_MODEL=model/trafficlight_ncnn_model
+```
+
+补充说明：
+
+- 导出目录中应包含 `.param` 和 `.bin` 文件。
+- 如果导出链路报缺少 NCNN / pnnx 相关依赖，请先在 **uv 环境** 内补齐，不要装到系统 Python / conda 环境。
+- 如果你的模型对输入尺寸敏感，请用训练/部署时一致的 `--imgsz`。
+
+如果你想直接用 `pnnx` 命令行本体，也可以按官方 wiki 先导出 TorchScript，再运行 `uv run pnnx input.pt inputshape=[1,3,H,W]`；但对这个仓库来说，最终仍然建议整理成 `_ncnn_model` 目录后再交给运行时加载。
 
 ### 语音映射回退
 
