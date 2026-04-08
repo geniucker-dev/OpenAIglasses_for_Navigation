@@ -41,6 +41,8 @@ model/*.pt
 model/*.pth
 model/*.onnx
 model/*.engine
+model/*_ncnn_model/
+model/*_ncnn_model/**
 !model/.gitkeep
 
 # Recordings

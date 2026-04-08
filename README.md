@@ -99,7 +99,7 @@ cd aiglass
 
 ### 2. 安装依赖
 
-#### 推荐安装方式（PyTorch 自动选择后端）
+#### 推荐安装方式（uv + PyTorch 自动选择后端）
 ```bash
 uv sync
 uv pip install --torch-backend=auto torch torchvision ultralytics "clip @ git+https://github.com/ultralytics/CLIP.git"
@@ -107,7 +107,7 @@ uv pip install --torch-backend=auto torch torchvision ultralytics "clip @ git+ht
 
 说明：
 
-- 默认 `uv sync` 只同步项目核心依赖；PyTorch / Ultralytics / CLIP 这条机器学习栈需要单独安装，避免后续 `uv sync` 把已安装的 CUDA / ROCm / CPU 变体覆盖回通用 wheel。
+- 默认 `uv sync` ；PyTorch / Ultralytics / CLIP 这条机器学习栈仍需单独安装，避免后续 `uv sync` 把已安装的 CUDA / ROCm / CPU 变体覆盖回通用 wheel。
 - `uv pip --torch-backend=auto` 会为当前机器自动选择合适的 PyTorch 安装来源（如 CPU / CUDA / ROCm）。
 - macOS / Apple Silicon 不存在单独的 “MPS wheel”；安装 macOS 版 PyTorch 后，程序运行时会自动检测并使用 `mps`。
 - 如需 NVIDIA GPU 加速，请先确保本机 CUDA 驱动环境正常，再执行上面的安装命令。
@@ -124,6 +124,8 @@ uv pip install --torch-backend=auto torch torchvision ultralytics "clip @ git+ht
 | `shoppingbest5.pt` | 物品识别 | ~30MB | [待补充] |
 | `trafficlight.pt` | 红绿灯检测 | ~20MB | [待补充] |
 | `hand_landmarker.task` | 手部检测 | ~15MB | [MediaPipe Models](https://developers.google.com/mediapipe/solutions/vision/hand_landmarker#models) |
+
+下载完成后，**普通 YOLO 先保留 `.pt` 原始模型，再额外导出一份 NCNN 目录**。仓库运行普通 YOLO 时使用的是导出的 `_ncnn_model` 目录；YOLOE 仍直接使用 `.pt`。
 
 ### 4. 配置 API 密钥
 
@@ -148,6 +150,8 @@ API_KEY = "your_api_key_here"
 > ```
 
 ### 6. 启动系统
+
+首次启动前，请先完成下文的 **NCNN 转换步骤**。
 
 ```bash
 uv run python app_main.py
@@ -398,7 +402,7 @@ DASHSCOPE_API_KEY=sk-xxxxx
 # 设备选择（可选：cuda / mps / cpu）
 AIGLASS_DEVICE=mps
 
-# 模型路径（可选，使用默认路径可不配置）
+# 模型路径（普通 YOLO 默认读取转换后的 NCNN 目录）
 BLIND_PATH_MODEL=model/yolo-seg_ncnn_model
 OBSTACLE_MODEL=model/yoloe-11l-seg.pt
 YOLOE_MODEL_PATH=model/yoloe-11l-seg.pt
@@ -420,10 +424,10 @@ ENABLE_TTS=true                 # 启用语音播报
 优先通过环境变量覆盖默认路径，而不是直接改源码：
 
 ```bash
-BLIND_PATH_MODEL=/your/path/yolo-seg.pt
+BLIND_PATH_MODEL=/your/path/yolo-seg_ncnn_model
 OBSTACLE_MODEL=/your/path/yoloe-11l-seg.pt
 YOLOE_MODEL_PATH=/your/path/yoloe-11l-seg.pt
-TRAFFIC_LIGHT_MODEL=/your/path/trafficlight.pt
+TRAFFIC_LIGHT_MODEL=/your/path/trafficlight_ncnn_model
 ```
 
 如果你已经把普通 YOLO 模型导出成 NCNN，可直接把路径改成导出的目录（通常以 `_ncnn_model` 结尾）：
@@ -435,22 +439,28 @@ TRAFFIC_LIGHT_MODEL=model/trafficlight_ncnn_model
 
 说明：
 
-- 现在仓库里的 **普通 YOLO**（如盲道分割、红绿灯检测）会按模型路径自动选择 `torch` 或 `ncnn`。
+- 现在仓库里的 **普通 YOLO**（如盲道分割、红绿灯检测）默认应指向导出的 NCNN 目录。
 - **YOLOE 仍保持 PyTorch 路径**，继续使用 `OBSTACLE_MODEL` / `YOLOE_MODEL_PATH` 指向 `.pt` 模型。
-- 如需强制普通 YOLO 的运行后端，可设置 `AIGLASS_STD_YOLO_BACKEND=torch` 或 `AIGLASS_STD_YOLO_BACKEND=ncnn`。
+- 下载到的 `.pt` 文件不要删；它们是后续重新导出 NCNN 的输入模型。
 
-### 使用 pnnx / NCNN 导出普通 YOLO
+### 导出普通 YOLO 的 NCNN 模型
 
-本仓库运行时要求 NCNN 模型以 **Ultralytics 导出的 `_ncnn_model` 目录** 形式存在，这样 `standard_yolo_backend.py` 才能直接用 `YOLO("..._ncnn_model")` 加载。
+本仓库运行时要求普通 YOLO 以 **Ultralytics 导出的 `_ncnn_model` 目录** 形式存在，这样 `standard_yolo_backend.py` 才能直接用 `YOLO("..._ncnn_model")` 加载。
 
-虽然 NCNN 官方文档推荐 PyTorch 模型优先走 **pnnx** 工具链，但在这个仓库里，最稳妥的方式是通过 Ultralytics 的 `format="ncnn"` 导出入口来生成兼容目录；这条路径底层就是面向 NCNN/pnnx 的导出流程，同时能保留当前代码已经适配好的目录结构。
+在这个仓库里，实际采用的是 Ultralytics 的 `format="ncnn"` 导出入口；它会直接生成本仓库可用的目录结构。
 
 参考：
 
 - NCNN 官方说明：<https://github.com/tencent/ncnn/wiki/use-ncnn-with-pytorch-or-onnx>
-- pnnx README：<https://github.com/Tencent/ncnn/tree/master/tools/pnnx>
 
-只转换普通 YOLO：
+先确保基础环境已经按上面的方式准备好：
+
+```bash
+uv sync
+uv pip install --torch-backend=auto torch torchvision ultralytics "clip @ git+https://github.com/ultralytics/CLIP.git"
+```
+
+然后只转换普通 YOLO：
 
 - `model/yolo-seg.pt` → 盲道 / 斑马线分割
 - `model/trafficlight.pt` → 红绿灯检测
@@ -461,9 +471,9 @@ TRAFFIC_LIGHT_MODEL=model/trafficlight_ncnn_model
 - `OBSTACLE_MODEL`
 - `YOLOE_MODEL_PATH`
 
-可以直接用命令行导出，不需要额外写仓库脚本。
+可以直接用命令行导出，不需要额外写仓库脚本：
 
-如果你更关心**和当前运行时完全兼容的目录结构**，最直接的命令行方式是用 Ultralytics 自带的 NCNN 导出入口；它底层会调用 NCNN / pnnx 工具链，并直接生成本仓库可用的 `_ncnn_model` 目录：
+如果你更关心**和当前运行时完全兼容的目录结构**，最直接的命令行方式就是用 Ultralytics 自带的 NCNN 导出入口，它会直接生成本仓库可用的 `_ncnn_model` 目录：
 
 ```bash
 uv run yolo export model=model/yolo-seg.pt format=ncnn imgsz=640
@@ -487,10 +497,10 @@ TRAFFIC_LIGHT_MODEL=model/trafficlight_ncnn_model
 补充说明：
 
 - 导出目录中应包含 `.param` 和 `.bin` 文件。
-- 如果导出链路报缺少 NCNN / pnnx 相关依赖，请先在 **uv 环境** 内补齐，不要装到系统 Python / conda 环境。
+- `_ncnn_model` 目录属于导出产物，默认已加入 `.gitignore`，不要直接提交到仓库。
 - 如果你的模型对输入尺寸敏感，请用训练/部署时一致的 `--imgsz`。
 
-如果你想直接用 `pnnx` 命令行本体，也可以按官方 wiki 先导出 TorchScript，再运行 `uv run pnnx input.pt inputshape=[1,3,H,W]`；但对这个仓库来说，最终仍然建议整理成 `_ncnn_model` 目录后再交给运行时加载。
+完整顺序可以概括为：**下载 `.pt` → 执行 `uv run yolo export ... format=ncnn` → 得到 `_ncnn_model` 目录 → 启动 `uv run python app_main.py`**。
 
 ### 语音映射回退
 

@@ -126,10 +126,12 @@ ESP32 IMU
 ```bash
 uv sync
 uv pip install --torch-backend=auto torch torchvision ultralytics "clip @ git+https://github.com/ultralytics/CLIP.git"
+uv run yolo export model=model/yolo-seg.pt format=ncnn imgsz=640
+uv run yolo export model=model/trafficlight.pt format=ncnn imgsz=640
 uv run python app_main.py
 ```
 
-说明：默认 `uv sync` 只同步核心依赖；`uv pip --torch-backend=auto` 用于单独安装 PyTorch / Ultralytics / CLIP 这条机器学习栈，避免后续同步把不同机器上的 CUDA / ROCm / CPU 变体覆盖回通用 wheel。macOS 上的 MPS 仍然是运行时自动选择。
+说明：默认 `uv sync` 会同步仓库声明的基础依赖（包括 `ncnn`）；`uv pip --torch-backend=auto` 用于单独安装 PyTorch / Ultralytics / CLIP 这条机器学习栈，避免后续同步把不同机器上的 CUDA / ROCm / CPU 变体覆盖回通用 wheel。macOS 上的 MPS 仍然是运行时自动选择。普通 YOLO 在启动前还需要从下载到的 `.pt` 模型导出 `_ncnn_model` 目录。
 
 ### 固件
 
