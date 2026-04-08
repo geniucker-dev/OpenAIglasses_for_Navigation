@@ -408,6 +408,9 @@ OBSTACLE_MODEL=model/yoloe-11l-seg.pt
 YOLOE_MODEL_PATH=model/yoloe-11l-seg.pt
 TRAFFIC_LIGHT_MODEL=model/trafficlight_ncnn_model
 
+# NCNN 运行设备（默认 auto：优先 Vulkan，其次 CPU）
+AIGLASS_NCNN_DEVICE=auto
+
 # 导航参数
 AIGLASS_MASK_MIN_AREA=1500      # 最小掩码面积
 AIGLASS_MASK_MORPH=3            # 形态学核大小
@@ -442,6 +445,8 @@ TRAFFIC_LIGHT_MODEL=model/trafficlight_ncnn_model
 - 现在仓库里的 **普通 YOLO**（如盲道分割、红绿灯检测）默认应指向导出的 NCNN 目录。
 - **YOLOE 仍保持 PyTorch 路径**，继续使用 `OBSTACLE_MODEL` / `YOLOE_MODEL_PATH` 指向 `.pt` 模型。
 - 下载到的 `.pt` 文件不要删；它们是后续重新导出 NCNN 的输入模型。
+- 普通 YOLO 的 NCNN 推理现在默认会尝试 **Vulkan**，并自动选择最优候选 GPU；如果没有可用 Vulkan 设备，会自动回退到 CPU。
+- 如需强制指定 NCNN 设备，可设置 `AIGLASS_NCNN_DEVICE=cpu` 或 `AIGLASS_NCNN_DEVICE=vulkan:0` / `vulkan:1`。
 
 ### 导出普通 YOLO 的 NCNN 模型
 
@@ -501,6 +506,12 @@ TRAFFIC_LIGHT_MODEL=model/trafficlight_ncnn_model
 - 如果你的模型对输入尺寸敏感，请用训练/部署时一致的 `--imgsz`。
 
 完整顺序可以概括为：**下载 `.pt` → 执行 `uv run yolo export ... format=ncnn` → 得到 `_ncnn_model` 目录 → 启动 `uv run python app_main.py`**。
+
+补充：
+
+- 运行时普通 YOLO 会优先走 `AIGLASS_NCNN_DEVICE=auto`，也就是优先启用 Vulkan。
+- 如果机器上同时有多个 Vulkan 设备，程序会优先选择 NCNN 默认 GPU，并结合设备类型做自动选择。
+- 如果 Vulkan 不可用，程序会自动回退到 CPU，不需要单独改代码。
 
 ### 语音映射回退
 

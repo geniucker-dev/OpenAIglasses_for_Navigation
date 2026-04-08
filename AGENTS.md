@@ -95,7 +95,7 @@
 - 普通 YOLO 在运行前还需要从 `.pt` 额外导出对应的 NCNN 目录：
   - `yolo-seg_ncnn_model/`
   - `trafficlight_ncnn_model/`
-- 环境变量可覆盖: `BLIND_PATH_MODEL`, `YOLOE_MODEL_PATH`, `OBSTACLE_MODEL`
+- 环境变量可覆盖: `BLIND_PATH_MODEL`, `YOLOE_MODEL_PATH`, `OBSTACLE_MODEL`, `TRAFFIC_LIGHT_MODEL`, `AIGLASS_NCNN_DEVICE`
 
 ### 环境变量
 - **必需**: `DASHSCOPE_API_KEY` (阿里云ASR/Qwen)
@@ -106,7 +106,12 @@
 - 强制指定设备：设置环境变量 `AIGLASS_DEVICE=cuda` / `mps` / `cpu`
 - AMP 自动混合精度：CUDA 支持 bf16/fp16，MPS 支持 fp16
 - 配置文件: `device_utils.py`
-- 这里描述的是**运行时设备选择**；PyTorch 的安装推荐交给 `uv pip --torch-backend=auto` 处理
+- 这里描述的是**PyTorch 路径**的运行时设备选择；PyTorch 的安装推荐交给 `uv pip --torch-backend=auto` 处理
+
+### NCNN / Vulkan 设备选择
+- 普通 YOLO 的 NCNN 路径默认会优先尝试 Vulkan，没有可用 Vulkan 设备时自动回退到 CPU
+- 可通过 `AIGLASS_NCNN_DEVICE=auto|cpu|vulkan:0|vulkan:1...` 覆盖
+- 当前实现位于 `standard_yolo_backend.py`，会在首次使用 NCNN 时自动选择设备并缓存结果
 
 ### 项目特定约定
 - 使用 `pyproject.toml` 管理依赖
