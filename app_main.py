@@ -15,6 +15,7 @@ from workflow_blindpath import BlindPathNavigator
 
 # 新增：导入过马路导航器
 from workflow_crossstreet import CrossStreetNavigator
+import torch
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
@@ -22,10 +23,12 @@ from starlette.websockets import WebSocketState
 import uvicorn
 import cv2
 import numpy as np
+from ultralytics import YOLO
 from obstacle_detector_client import ObstacleDetectorClient
 from device_utils import DEVICE, IS_CUDA
-from standard_yolo_backend import load_standard_yolo_model
-from yoloe_backend import YoloEBackend
+
+import torch  # 添加这行
+
 
 import mediapipe as mp
 import bridge_io
@@ -129,42 +132,6 @@ orchestrator = None  # 新增
 omni_conversation_active = False  # 标记omni对话是否正在进行
 omni_previous_nav_state = None  # 保存omni激活前的导航状态，用于恢复
 
-ESP32_DEFAULT_FRAME_WIDTH = 640
-ESP32_DEFAULT_FRAME_HEIGHT = 480
-YOLOE_WARMUP_IMGSZ = 640
-
-
-def build_yoloe_warmup_frame():
-    """Build a synthetic frame matching the default ESP32 stream shape."""
-    frame = np.zeros(
-        (ESP32_DEFAULT_FRAME_HEIGHT, ESP32_DEFAULT_FRAME_WIDTH, 3), dtype=np.uint8
-    )
-    cv2.rectangle(frame, (220, 120), (420, 360), (255, 255, 255), -1)
-    cv2.circle(frame, (320, 240), 60, (0, 200, 255), -1)
-    return frame
-
-
-def warmup_item_search_yoloe(model_path: str):
-    """Preheat the item-search YOLOE track path before first live use."""
-    print("[NAVIGATION] 开始预热 YOLO-E 找物路径...")
-    try:
-        warmup_backend = YoloEBackend(model_path=model_path)
-        warmup_backend.set_text_classes(["bottle"])
-        warmup_frame = build_yoloe_warmup_frame()
-        _ = warmup_backend.segment(
-            warmup_frame,
-            conf=0.20,
-            iou=0.45,
-            imgsz=YOLOE_WARMUP_IMGSZ,
-            persist=True,
-        )
-        print(
-            "[NAVIGATION] YOLO-E 找物路径预热完成 "
-            f"({ESP32_DEFAULT_FRAME_WIDTH}x{ESP32_DEFAULT_FRAME_HEIGHT}, imgsz={YOLOE_WARMUP_IMGSZ}, model={model_path})"
-        )
-    except Exception as e:
-        print(f"[NAVIGATION] YOLO-E 找物路径预热失败: {e}")
-
 
 # 【新增】模型加载函数
 def load_navigation_models():
@@ -172,21 +139,19 @@ def load_navigation_models():
     global yolo_seg_model, obstacle_detector
 
     try:
-        seg_model_path = os.getenv("BLIND_PATH_MODEL", "model/yolo-seg_ncnn_model")
+        seg_model_path = os.getenv("BLIND_PATH_MODEL", "model/yolo-seg.pt")
 
         if os.path.exists(seg_model_path):
             print(f"[NAVIGATION] 模型文件存在，开始加载...")
-            yolo_seg_model = load_standard_yolo_model(seg_model_path, task="segment")
-            backend_name = getattr(yolo_seg_model, "backend", "torch")
-            print(
-                f"[NAVIGATION] 盲道分割模型加载成功，后端: {backend_name}"
-                + (f", 设备: {DEVICE}" if backend_name == "torch" else "")
-            )
+            yolo_seg_model = YOLO(seg_model_path)
+            yolo_seg_model.to(DEVICE)
+            print(f"[NAVIGATION] 盲道分割模型加载成功，设备: {DEVICE}")
 
             try:
                 test_img = np.zeros((640, 640, 3), dtype=np.uint8)
                 results = yolo_seg_model.predict(
                     test_img,
+                    device=DEVICE,
                     verbose=False,
                 )
                 print(
@@ -201,9 +166,7 @@ def load_navigation_models():
             print(f"[NAVIGATION] 当前工作目录: {os.getcwd()}")
             print(f"[NAVIGATION] 请检查文件路径是否正确")
 
-        obstacle_model_path = os.getenv(
-            "OBSTACLE_MODEL", "model/yoloe-11l-seg_ncnn_model"
-        )
+        obstacle_model_path = os.getenv("OBSTACLE_MODEL", "model/yoloe-11l-seg.pt")
         print(f"[NAVIGATION] 尝试加载障碍物检测模型: {obstacle_model_path}")
 
         if os.path.exists(obstacle_model_path):
@@ -219,16 +182,9 @@ def load_navigation_models():
                     and obstacle_detector.model is not None
                 ):
                     print(f"[NAVIGATION] YOLO-E 模型已初始化")
-                    obstacle_backend = getattr(obstacle_detector, "backend", "torch")
-                    if obstacle_backend == "ncnn":
-                        runtime_device = getattr(
-                            obstacle_detector.model, "runtime_device", "cpu"
-                        )
-                        print(f"[NAVIGATION] 模型后端: ncnn, 设备: {runtime_device}")
-                    else:
-                        print(
-                            f"[NAVIGATION] 模型设备: {next(obstacle_detector.model.parameters()).device}"
-                        )
+                    print(
+                        f"[NAVIGATION] 模型设备: {next(obstacle_detector.model.parameters()).device}"
+                    )
                 else:
                     print(f"[NAVIGATION] 警告：YOLO-E 模型初始化异常")
 
@@ -250,15 +206,15 @@ def load_navigation_models():
                     print(
                         f"[NAVIGATION] 文本特征张量形状: {obstacle_detector.whitelist_embeddings.shape if hasattr(obstacle_detector.whitelist_embeddings, 'shape') else '未知'}"
                     )
-                elif getattr(obstacle_detector, "backend", "torch") == "ncnn":
-                    print("[NAVIGATION] YOLO-E NCNN 导出模型不支持运行时文本提示词")
                 else:
                     print(f"[NAVIGATION] 警告：YOLO-E 文本特征未预计算")
 
                 # 测试障碍物检测功能
                 print(f"[NAVIGATION] 开始测试 YOLO-E 检测功能...")
                 try:
-                    test_img = build_yoloe_warmup_frame()
+                    test_img = np.zeros((640, 640, 3), dtype=np.uint8)
+                    # 在测试图像中画一个白色矩形，模拟一个物体
+                    cv2.rectangle(test_img, (200, 200), (400, 400), (255, 255, 255), -1)
 
                     # 测试检测（不提供 path_mask）
                     test_results = obstacle_detector.detect(test_img)
@@ -278,11 +234,6 @@ def load_navigation_models():
                     import traceback
 
                     traceback.print_exc()
-
-                item_search_model_path = os.getenv(
-                    "YOLOE_MODEL_PATH", "model/yoloe-11l-seg.pt"
-                )
-                warmup_item_search_yoloe(item_search_model_path)
 
                 print(f"[NAVIGATION] ========== YOLO-E 障碍物检测器加载完成 ==========")
 

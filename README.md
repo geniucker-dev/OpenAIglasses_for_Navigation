@@ -99,15 +99,15 @@ cd aiglass
 
 ### 2. 安装依赖
 
-#### 推荐安装方式（uv + PyTorch 自动选择后端）
+#### 推荐安装方式（PyTorch 自动选择后端）
 ```bash
 uv sync
-uv pip install --torch-backend=auto torch torchvision ultralytics "clip @ git+https://github.com/ultralytics/CLIP.git" pnnx
+uv pip install --torch-backend=auto torch torchvision ultralytics "clip @ git+https://github.com/ultralytics/CLIP.git"
 ```
 
 说明：
 
-- 默认 `uv sync` ；PyTorch / Ultralytics / CLIP 这条机器学习栈仍需单独安装，避免后续 `uv sync` 把已安装的 CUDA / ROCm / CPU 变体覆盖回通用 wheel。
+- 默认 `uv sync` 只同步项目核心依赖；PyTorch / Ultralytics / CLIP 这条机器学习栈需要单独安装，避免后续 `uv sync` 把已安装的 CUDA / ROCm / CPU 变体覆盖回通用 wheel。
 - `uv pip --torch-backend=auto` 会为当前机器自动选择合适的 PyTorch 安装来源（如 CPU / CUDA / ROCm）。
 - macOS / Apple Silicon 不存在单独的 “MPS wheel”；安装 macOS 版 PyTorch 后，程序运行时会自动检测并使用 `mps`。
 - 如需 NVIDIA GPU 加速，请先确保本机 CUDA 驱动环境正常，再执行上面的安装命令。
@@ -124,8 +124,6 @@ uv pip install --torch-backend=auto torch torchvision ultralytics "clip @ git+ht
 | `shoppingbest5.pt` | 物品识别 | ~30MB | [待补充] |
 | `trafficlight.pt` | 红绿灯检测 | ~20MB | [待补充] |
 | `hand_landmarker.task` | 手部检测 | ~15MB | [MediaPipe Models](https://developers.google.com/mediapipe/solutions/vision/hand_landmarker#models) |
-
-下载完成后，**这些 YOLO 模型都先保留 `.pt` 原始文件，再按运行模式补充导出需要的 NCNN 目录**。当前分支采用混合方案：障碍物 YOLOE 读取 `yoloe-11l-seg_ncnn_model`，找物 YOLOE 继续读取 `.pt`。
 
 ### 4. 配置 API 密钥
 
@@ -150,8 +148,6 @@ API_KEY = "your_api_key_here"
 > ```
 
 ### 6. 启动系统
-
-首次启动前，请先完成下文的 **NCNN 转换步骤**。
 
 ```bash
 uv run python app_main.py
@@ -402,14 +398,11 @@ DASHSCOPE_API_KEY=sk-xxxxx
 # 设备选择（可选：cuda / mps / cpu）
 AIGLASS_DEVICE=mps
 
-# 模型路径（普通 YOLO 默认读取转换后的 NCNN 目录）
-BLIND_PATH_MODEL=model/yolo-seg_ncnn_model
-OBSTACLE_MODEL=model/yoloe-11l-seg_ncnn_model
+# 模型路径（可选，使用默认路径可不配置）
+BLIND_PATH_MODEL=model/yolo-seg.pt
+OBSTACLE_MODEL=model/yoloe-11l-seg.pt
 YOLOE_MODEL_PATH=model/yoloe-11l-seg.pt
-TRAFFIC_LIGHT_MODEL=model/trafficlight_ncnn_model
-
-# NCNN 运行设备（默认 auto：优先 Vulkan，其次 CPU）
-AIGLASS_NCNN_DEVICE=auto
+TRAFFIC_LIGHT_MODEL=model/trafficlight.pt
 
 # 导航参数
 AIGLASS_MASK_MIN_AREA=1500      # 最小掩码面积
@@ -427,91 +420,11 @@ ENABLE_TTS=true                 # 启用语音播报
 优先通过环境变量覆盖默认路径，而不是直接改源码：
 
 ```bash
-BLIND_PATH_MODEL=/your/path/yolo-seg_ncnn_model
-OBSTACLE_MODEL=/your/path/yoloe-11l-seg_ncnn_model
+BLIND_PATH_MODEL=/your/path/yolo-seg.pt
+OBSTACLE_MODEL=/your/path/yoloe-11l-seg.pt
 YOLOE_MODEL_PATH=/your/path/yoloe-11l-seg.pt
-TRAFFIC_LIGHT_MODEL=/your/path/trafficlight_ncnn_model
+TRAFFIC_LIGHT_MODEL=/your/path/trafficlight.pt
 ```
-
-如果你已经把普通 YOLO 模型导出成 NCNN，可直接把路径改成导出的目录（通常以 `_ncnn_model` 结尾）：
-
-```bash
-BLIND_PATH_MODEL=model/yolo-seg_ncnn_model
-TRAFFIC_LIGHT_MODEL=model/trafficlight_ncnn_model
-```
-
-说明：
-
-- 现在仓库里的 **普通 YOLO**（如盲道分割、红绿灯检测）默认应指向导出的 NCNN 目录。
-- 当前分支采用 **混合 YOLOE 路径**：
-  - `OBSTACLE_MODEL` → `model/yoloe-11l-seg_ncnn_model`（障碍物检测，NCNN + Vulkan）
-  - `YOLOE_MODEL_PATH` → `model/yoloe-11l-seg.pt`（找物模式，保留开放词汇文本提示词）
-- 原因是 YOLOE 导出成 NCNN 后，不再保留运行时文本提示词接口（如 `set_classes` / `get_text_pe`）；因此障碍物检测适合走 NCNN，找物模式则继续保留 Torch 路径。
-- 下载到的 `.pt` 文件不要删；它们是后续重新导出 NCNN 的输入模型。
-- 普通 YOLO 的 NCNN 推理现在默认会尝试 **Vulkan**，并自动选择最优候选 GPU；如果没有可用 Vulkan 设备，会自动回退到 CPU。
-- 如需强制指定 NCNN 设备，可设置 `AIGLASS_NCNN_DEVICE=cpu` 或 `AIGLASS_NCNN_DEVICE=vulkan:0` / `vulkan:1`。
-
-### 导出普通 YOLO 的 NCNN 模型
-
-本仓库运行时要求普通 YOLO 以 **Ultralytics 导出的 `_ncnn_model` 目录** 形式存在，这样 `standard_yolo_backend.py` 才能直接用 `YOLO("..._ncnn_model")` 加载。
-
-在这个仓库里，实际采用的是 Ultralytics 的 `format="ncnn"` 导出入口；它会直接生成本仓库可用的目录结构。
-
-参考：
-
-- NCNN 官方说明：<https://github.com/tencent/ncnn/wiki/use-ncnn-with-pytorch-or-onnx>
-
-先确保基础环境已经按上面的方式准备好：
-
-```bash
-uv sync
-uv pip install --torch-backend=auto torch torchvision ultralytics "clip @ git+https://github.com/ultralytics/CLIP.git" pnnx
-```
-
-然后转换运行时会用到的普通 YOLO 和障碍物 YOLOE：
-
-- `model/yolo-seg.pt` → `model/yolo-seg_ncnn_model`
-- `model/trafficlight.pt` → `model/trafficlight_ncnn_model`
-- `model/yoloe-11l-seg.pt` → `model/yoloe-11l-seg_ncnn_model`
-
-可以直接用命令行导出，不需要额外写仓库脚本：
-
-如果你更关心**和当前运行时完全兼容的目录结构**，最直接的命令行方式就是用 Ultralytics 自带的 NCNN 导出入口，它会直接生成本仓库可用的 `_ncnn_model` 目录：
-
-```bash
-uv run yolo export model=model/yolo-seg.pt format=ncnn imgsz=640
-uv run yolo export model=model/trafficlight.pt format=ncnn imgsz=640
-uv run yolo export model=model/yoloe-11l-seg.pt format=ncnn imgsz=640
-```
-
-导出成功后通常会得到类似目录：
-
-```bash
-model/yolo-seg_ncnn_model
-model/trafficlight_ncnn_model
-model/yoloe-11l-seg_ncnn_model
-```
-
-然后把环境变量切到这些目录：
-
-```bash
-BLIND_PATH_MODEL=model/yolo-seg_ncnn_model
-TRAFFIC_LIGHT_MODEL=model/trafficlight_ncnn_model
-```
-
-补充说明：
-
-- 导出目录中应包含 `.param` 和 `.bin` 文件。
-- `_ncnn_model` 目录属于导出产物，默认已加入 `.gitignore`，不要直接提交到仓库。
-- 如果你的模型对输入尺寸敏感，请用训练/部署时一致的 `--imgsz`。
-
-完整顺序可以概括为：**下载 `.pt` → 执行 `uv run yolo export ... format=ncnn` → 得到 `_ncnn_model` 目录 → 启动 `uv run python app_main.py`**。
-
-补充：
-
-- 运行时普通 YOLO 会优先走 `AIGLASS_NCNN_DEVICE=auto`，也就是优先启用 Vulkan。
-- 如果机器上同时有多个 Vulkan 设备，程序会优先选择 NCNN 默认 GPU，并结合设备类型做自动选择。
-- 如果 Vulkan 不可用，程序会自动回退到 CPU，不需要单独改代码。
 
 ### 语音映射回退
 

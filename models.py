@@ -61,7 +61,7 @@ def init_all_models():
         global obstacle_detector_client
         logger.info("[1/4] 正在加载通用障碍物检测模型 (ObstacleDetectorClient)...")
         obstacle_detector_client = ObstacleDetectorClient(
-            model_path="model/yoloe-11l-seg_ncnn_model"
+            model_path="models/yoloe-11l-seg.pt"
         )
 
         if (

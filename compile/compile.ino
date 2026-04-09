@@ -19,7 +19,7 @@ using namespace websockets;
 // ===== WiFi / Server =====
 const char* WIFI_SSID   = "ece445_tmp";
 const char* WIFI_PASS   = "ece445_tmppass";
-const char* SERVER_HOST = "ece445_server.geniucker.top";
+const char* SERVER_HOST = "Mac.lan";
 const uint16_t SERVER_PORT = 8081;
 
 // ===== Status LED =====

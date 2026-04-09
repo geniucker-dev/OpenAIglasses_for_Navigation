@@ -349,7 +349,7 @@ class CrossStreetNavigator:
             try:
                 if ObstacleDetectorClient is not None:
                     model_path = os.getenv(
-                        "AIGLASS_OBS_MODEL", "model/yoloe-11l-seg_ncnn_model"
+                        "AIGLASS_OBS_MODEL", "model/yoloe-11l-seg.pt"
                     )
                     self.obstacle_detector = ObstacleDetectorClient(model_path)
                     logger.info("[CROSS_STREET] 障碍物检测器已自动加载")
@@ -375,16 +375,12 @@ class CrossStreetNavigator:
 
         if self.seg_model:
             try:
-                backend_name = getattr(self.seg_model, "backend", None)
-                if backend_name == "ncnn":
-                    logger.info("[CROSS_STREET] NCNN 后端无需 torch 设备迁移")
-                else:
-                    to_device(
-                        self.seg_model.model
-                        if hasattr(self.seg_model, "model")
-                        else self.seg_model
-                    )
-                    logger.info(f"[CROSS_STREET] 模型已移至 {DEVICE}")
+                to_device(
+                    self.seg_model.model
+                    if hasattr(self.seg_model, "model")
+                    else self.seg_model
+                )
+                logger.info(f"[CROSS_STREET] 模型已移至 {DEVICE}")
             except Exception as e:
                 logger.warning(f"[CROSS_STREET] 无法将模型移至设备: {e}")
 
@@ -2281,29 +2277,11 @@ class YOLOModelWrapper:
     def __init__(self, yolo_model):
         self.model = yolo_model
 
-    @staticmethod
-    def _scalar(value, default=0.0):
-        try:
-            if hasattr(value, "item"):
-                return value.item()
-            arr = np.asarray(value)
-            if arr.size == 0:
-                return default
-            return arr.reshape(-1)[0].item()
-        except Exception:
-            return default
-
-    @staticmethod
-    def _to_numpy(value):
-        if hasattr(value, "cpu"):
-            value = value.cpu()
-        return np.asarray(value)
-
     def detect(self, image, confidence_threshold=0.25):
         """使用 predict 方法并转换为 detect 格式"""
         try:
             results = self.model.predict(
-                image, conf=confidence_threshold, verbose=False
+                image, conf=confidence_threshold, verbose=False, device=DEVICE
             )
             detections = []
             if results and len(results) > 0:
@@ -2311,16 +2289,14 @@ class YOLOModelWrapper:
                 if hasattr(result, "masks") and result.masks is not None:
                     for i, mask in enumerate(result.masks.data):
                         if hasattr(result, "boxes") and result.boxes is not None:
-                            cls = int(self._scalar(result.boxes.cls[i], default=0))
-                            conf = float(
-                                self._scalar(result.boxes.conf[i], default=0.0)
-                            )
+                            cls = int(result.boxes.cls[i].cpu().numpy())
+                            conf = float(result.boxes.conf[i].cpu().numpy())
 
                             class Detection:
                                 def __init__(self):
                                     self.cls = cls
                                     self.conf = conf
-                                    self.mask = YOLOModelWrapper._to_numpy(mask)
+                                    self.mask = mask.cpu().numpy()
 
                             detections.append(Detection())
             return detections

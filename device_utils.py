@@ -108,10 +108,6 @@ IS_CUDA = DEVICE_TYPE == "cuda"
 IS_MPS = DEVICE_TYPE == "mps"
 IS_CPU = DEVICE_TYPE == "cpu"
 
-# ROCm (AMD) 也走 "cuda" 设备类型，但 MIOpen 的 autotuning 比 cuDNN 慢几个数量级
-# 需要区分 NVIDIA 和 AMD 来决定是否开 benchmark
-IS_ROCM = IS_CUDA and hasattr(torch.version, "hip") and torch.version.hip is not None
-
 # AMP (自动混合精度) 配置
 AMP_POLICY = os.getenv("AIGLASS_AMP", "auto").lower()
 
@@ -238,7 +234,7 @@ if __name__ != "__main__":
 # ============ cuDNN 优化 ============
 
 try:
-    if IS_CUDA and not IS_ROCM:
+    if IS_CUDA:
         torch.backends.cudnn.benchmark = True
 except Exception as e:
     logger.debug(f"[DEVICE] cuDNN benchmark setup failed: {e}")
