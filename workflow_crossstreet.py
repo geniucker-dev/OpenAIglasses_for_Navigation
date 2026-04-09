@@ -349,7 +349,7 @@ class CrossStreetNavigator:
             try:
                 if ObstacleDetectorClient is not None:
                     model_path = os.getenv(
-                        "AIGLASS_OBS_MODEL", "model/yoloe-11l-seg.pt"
+                        "AIGLASS_OBS_MODEL", "model/yoloe-11l-seg_ncnn_model"
                     )
                     self.obstacle_detector = ObstacleDetectorClient(model_path)
                     logger.info("[CROSS_STREET] 障碍物检测器已自动加载")

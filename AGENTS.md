@@ -95,6 +95,7 @@
 - 普通 YOLO 在运行前还需要从 `.pt` 额外导出对应的 NCNN 目录：
   - `yolo-seg_ncnn_model/`
   - `trafficlight_ncnn_model/`
+  - `yoloe-11l-seg_ncnn_model/`
 - 环境变量可覆盖: `BLIND_PATH_MODEL`, `YOLOE_MODEL_PATH`, `OBSTACLE_MODEL`, `TRAFFIC_LIGHT_MODEL`, `AIGLASS_NCNN_DEVICE`
 
 ### 环境变量
@@ -143,9 +144,10 @@
 uv sync
 uv pip install --torch-backend=auto torch torchvision ultralytics "clip @ git+https://github.com/ultralytics/CLIP.git" pnnx
 
-# 将普通 YOLO 从 .pt 导出为 NCNN 目录
+# 将运行时使用的 YOLO 从 .pt 导出为 NCNN 目录
 uv run yolo export model=model/yolo-seg.pt format=ncnn imgsz=640
 uv run yolo export model=model/trafficlight.pt format=ncnn imgsz=640
+uv run yolo export model=model/yoloe-11l-seg.pt format=ncnn imgsz=640
 
 # 启动服务
 uv run python app_main.py
@@ -174,7 +176,9 @@ uv run python test_recorder.py
 - **GPU推荐**: Linux/Windows 若追求更高帧率推荐 CUDA 11.8+；macOS 使用 MPS 加速；无 GPU 时自动使用 CPU
 - **Linux 音频构建依赖**: `pyaudio` 需要系统提供 `portaudio.h`；Ubuntu / Debian 可先安装 `portaudio19-dev` 与 `python3-dev`
 - 模型文件需从 ModelScope 下载: https://www.modelscope.cn/models/archifancy/AIGlasses_for_navigation
-- 下载到 `model/*.pt` 后，需要再执行一次 `uv run yolo export ... format=ncnn` 生成普通 YOLO 的 `_ncnn_model` 目录；YOLOE 仍直接使用 `.pt`
+- 下载到 `model/*.pt` 后，需要再执行一次 `uv run yolo export ... format=ncnn` 生成运行时需要的 `_ncnn_model` 目录；当前分支会读取 `yoloe-11l-seg_ncnn_model` 作为障碍物检测模型
+- 当前分支采用混合 YOLOE 路径：`OBSTACLE_MODEL` 默认走 `yoloe-11l-seg_ncnn_model`，`YOLOE_MODEL_PATH` 默认仍走 `yoloe-11l-seg.pt`
+- YOLOE 导出成 NCNN 后，不再保留运行时文本提示词接口（如 `set_classes` / `get_text_pe`）；因此找物模式继续保留 Torch 开放词汇路径，障碍物检测则使用导出模型原生类别结果
 - 需手动创建 `.env` 并设置 `DASHSCOPE_API_KEY`
 - 测试文件在 `PROJECT_STRUCTURE.md` 中文档化，但实际不在仓库中
 - 无CI/CD配置

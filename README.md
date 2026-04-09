@@ -125,7 +125,7 @@ uv pip install --torch-backend=auto torch torchvision ultralytics "clip @ git+ht
 | `trafficlight.pt` | 红绿灯检测 | ~20MB | [待补充] |
 | `hand_landmarker.task` | 手部检测 | ~15MB | [MediaPipe Models](https://developers.google.com/mediapipe/solutions/vision/hand_landmarker#models) |
 
-下载完成后，**普通 YOLO 先保留 `.pt` 原始模型，再额外导出一份 NCNN 目录**。仓库运行普通 YOLO 时使用的是导出的 `_ncnn_model` 目录；YOLOE 仍直接使用 `.pt`。
+下载完成后，**这些 YOLO 模型都先保留 `.pt` 原始文件，再按运行模式补充导出需要的 NCNN 目录**。当前分支采用混合方案：障碍物 YOLOE 读取 `yoloe-11l-seg_ncnn_model`，找物 YOLOE 继续读取 `.pt`。
 
 ### 4. 配置 API 密钥
 
@@ -404,7 +404,7 @@ AIGLASS_DEVICE=mps
 
 # 模型路径（普通 YOLO 默认读取转换后的 NCNN 目录）
 BLIND_PATH_MODEL=model/yolo-seg_ncnn_model
-OBSTACLE_MODEL=model/yoloe-11l-seg.pt
+OBSTACLE_MODEL=model/yoloe-11l-seg_ncnn_model
 YOLOE_MODEL_PATH=model/yoloe-11l-seg.pt
 TRAFFIC_LIGHT_MODEL=model/trafficlight_ncnn_model
 
@@ -428,7 +428,7 @@ ENABLE_TTS=true                 # 启用语音播报
 
 ```bash
 BLIND_PATH_MODEL=/your/path/yolo-seg_ncnn_model
-OBSTACLE_MODEL=/your/path/yoloe-11l-seg.pt
+OBSTACLE_MODEL=/your/path/yoloe-11l-seg_ncnn_model
 YOLOE_MODEL_PATH=/your/path/yoloe-11l-seg.pt
 TRAFFIC_LIGHT_MODEL=/your/path/trafficlight_ncnn_model
 ```
@@ -443,7 +443,10 @@ TRAFFIC_LIGHT_MODEL=model/trafficlight_ncnn_model
 说明：
 
 - 现在仓库里的 **普通 YOLO**（如盲道分割、红绿灯检测）默认应指向导出的 NCNN 目录。
-- **YOLOE 仍保持 PyTorch 路径**，继续使用 `OBSTACLE_MODEL` / `YOLOE_MODEL_PATH` 指向 `.pt` 模型。
+- 当前分支采用 **混合 YOLOE 路径**：
+  - `OBSTACLE_MODEL` → `model/yoloe-11l-seg_ncnn_model`（障碍物检测，NCNN + Vulkan）
+  - `YOLOE_MODEL_PATH` → `model/yoloe-11l-seg.pt`（找物模式，保留开放词汇文本提示词）
+- 原因是 YOLOE 导出成 NCNN 后，不再保留运行时文本提示词接口（如 `set_classes` / `get_text_pe`）；因此障碍物检测适合走 NCNN，找物模式则继续保留 Torch 路径。
 - 下载到的 `.pt` 文件不要删；它们是后续重新导出 NCNN 的输入模型。
 - 普通 YOLO 的 NCNN 推理现在默认会尝试 **Vulkan**，并自动选择最优候选 GPU；如果没有可用 Vulkan 设备，会自动回退到 CPU。
 - 如需强制指定 NCNN 设备，可设置 `AIGLASS_NCNN_DEVICE=cpu` 或 `AIGLASS_NCNN_DEVICE=vulkan:0` / `vulkan:1`。
@@ -465,16 +468,11 @@ uv sync
 uv pip install --torch-backend=auto torch torchvision ultralytics "clip @ git+https://github.com/ultralytics/CLIP.git" pnnx
 ```
 
-然后只转换普通 YOLO：
+然后转换运行时会用到的普通 YOLO 和障碍物 YOLOE：
 
-- `model/yolo-seg.pt` → 盲道 / 斑马线分割
-- `model/trafficlight.pt` → 红绿灯检测
-
-**不要转换 YOLOE**：
-
-- `model/yoloe-11l-seg.pt`
-- `OBSTACLE_MODEL`
-- `YOLOE_MODEL_PATH`
+- `model/yolo-seg.pt` → `model/yolo-seg_ncnn_model`
+- `model/trafficlight.pt` → `model/trafficlight_ncnn_model`
+- `model/yoloe-11l-seg.pt` → `model/yoloe-11l-seg_ncnn_model`
 
 可以直接用命令行导出，不需要额外写仓库脚本：
 
@@ -483,6 +481,7 @@ uv pip install --torch-backend=auto torch torchvision ultralytics "clip @ git+ht
 ```bash
 uv run yolo export model=model/yolo-seg.pt format=ncnn imgsz=640
 uv run yolo export model=model/trafficlight.pt format=ncnn imgsz=640
+uv run yolo export model=model/yoloe-11l-seg.pt format=ncnn imgsz=640
 ```
 
 导出成功后通常会得到类似目录：
@@ -490,6 +489,7 @@ uv run yolo export model=model/trafficlight.pt format=ncnn imgsz=640
 ```bash
 model/yolo-seg_ncnn_model
 model/trafficlight_ncnn_model
+model/yoloe-11l-seg_ncnn_model
 ```
 
 然后把环境变量切到这些目录：

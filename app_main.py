@@ -160,7 +160,7 @@ def warmup_item_search_yoloe(model_path: str):
         )
         print(
             "[NAVIGATION] YOLO-E 找物路径预热完成 "
-            f"({ESP32_DEFAULT_FRAME_WIDTH}x{ESP32_DEFAULT_FRAME_HEIGHT}, imgsz={YOLOE_WARMUP_IMGSZ})"
+            f"({ESP32_DEFAULT_FRAME_WIDTH}x{ESP32_DEFAULT_FRAME_HEIGHT}, imgsz={YOLOE_WARMUP_IMGSZ}, model={model_path})"
         )
     except Exception as e:
         print(f"[NAVIGATION] YOLO-E 找物路径预热失败: {e}")
@@ -201,7 +201,9 @@ def load_navigation_models():
             print(f"[NAVIGATION] 当前工作目录: {os.getcwd()}")
             print(f"[NAVIGATION] 请检查文件路径是否正确")
 
-        obstacle_model_path = os.getenv("OBSTACLE_MODEL", "model/yoloe-11l-seg.pt")
+        obstacle_model_path = os.getenv(
+            "OBSTACLE_MODEL", "model/yoloe-11l-seg_ncnn_model"
+        )
         print(f"[NAVIGATION] 尝试加载障碍物检测模型: {obstacle_model_path}")
 
         if os.path.exists(obstacle_model_path):
@@ -217,9 +219,16 @@ def load_navigation_models():
                     and obstacle_detector.model is not None
                 ):
                     print(f"[NAVIGATION] YOLO-E 模型已初始化")
-                    print(
-                        f"[NAVIGATION] 模型设备: {next(obstacle_detector.model.parameters()).device}"
-                    )
+                    obstacle_backend = getattr(obstacle_detector, "backend", "torch")
+                    if obstacle_backend == "ncnn":
+                        runtime_device = getattr(
+                            obstacle_detector.model, "runtime_device", "cpu"
+                        )
+                        print(f"[NAVIGATION] 模型后端: ncnn, 设备: {runtime_device}")
+                    else:
+                        print(
+                            f"[NAVIGATION] 模型设备: {next(obstacle_detector.model.parameters()).device}"
+                        )
                 else:
                     print(f"[NAVIGATION] 警告：YOLO-E 模型初始化异常")
 
@@ -241,6 +250,8 @@ def load_navigation_models():
                     print(
                         f"[NAVIGATION] 文本特征张量形状: {obstacle_detector.whitelist_embeddings.shape if hasattr(obstacle_detector.whitelist_embeddings, 'shape') else '未知'}"
                     )
+                elif getattr(obstacle_detector, "backend", "torch") == "ncnn":
+                    print("[NAVIGATION] YOLO-E NCNN 导出模型不支持运行时文本提示词")
                 else:
                     print(f"[NAVIGATION] 警告：YOLO-E 文本特征未预计算")
 
@@ -268,7 +279,10 @@ def load_navigation_models():
 
                     traceback.print_exc()
 
-                warmup_item_search_yoloe(obstacle_model_path)
+                item_search_model_path = os.getenv(
+                    "YOLOE_MODEL_PATH", "model/yoloe-11l-seg.pt"
+                )
+                warmup_item_search_yoloe(item_search_model_path)
 
                 print(f"[NAVIGATION] ========== YOLO-E 障碍物检测器加载完成 ==========")
 
