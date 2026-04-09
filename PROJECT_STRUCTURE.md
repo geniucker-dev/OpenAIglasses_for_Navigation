@@ -11,15 +11,24 @@
 ├── workflow_blindpath.py       # 盲道导航
 ├── workflow_crossstreet.py     # 过马路导航
 ├── yolomedia.py                # 物品查找 / 处理后画面发送
+├── yoloe_backend.py            # YOLO-E 开放词汇检测后端（MPS float64守卫）
+├── obstacle_detector_client.py # 障碍物检测客户端（MPS float64守卫 + bf16善后）
+├── trafficlight_detection.py   # 红绿灯 YOLO 检测
+├── models.py                   # 模型加载统一入口
 ├── asr_core.py                 # DashScope 实时 ASR 回调
 ├── omni_client.py              # Qwen-Omni 多模态对话
 ├── audio_player.py             # 多路音频播放
+├── audio_compressor.py         # 音频压缩
 ├── audio_stream.py             # /stream.wav HTTP 音频流
 ├── bridge_io.py                # 原始/处理后画面桥接
 ├── sync_recorder.py            # 音视频同步录制
-├── device_utils.py             # CUDA / MPS / CPU 自动选择
+├── device_utils.py             # CUDA / ROCm / MPS / CPU 自动选择 + AMP + GPU并发限流
+├── crosswalk_awareness.py      # 斑马线感知
+├── qwen_extractor.py           # Qwen 标签提取
+├── qwenturbo_template.py       # Qwen-Turbo 提示模板
+├── utils.py                    # 通用工具函数
 ├── templates/
-│   └── index.html              # Web 监控界面
+│   └── index.html              # Web 监控界面（含滚动聊天面板）
 ├── static/
 │   ├── main.js                 # 前端主逻辑：视频、状态、重连、聊天面板
 │   ├── vision.js               # 视觉相关前端工具
@@ -117,6 +126,8 @@ ESP32 IMU
 - audio 链路中，ESP32 侧重连或收到 `RESTART` 后会重新发送 `START`，因此服务端日志可能出现多次 `[AUDIO] START received`。
 - 当前仓库音频上行仍是 **裸 PCM**，**没有使用 Opus**。
 - 过马路分割与红绿灯 YOLO 路径都已显式接入 `device_utils.DEVICE`，在 Apple Silicon 上会优先尝试 MPS。
+- ROCm/AMD GPU 通过 `IS_ROCM` 自动检测，MIOpen 下不开启 `cudnn.benchmark`，避免 autotuning 卡顿。
+- AMP 自动混合精度：CUDA Ampere+ 默认 bf16，由 `gpu_infer_slot()` 统一管理。
 - 相机 websocket 断线重连只重置瞬时计数器，不再把导航状态机强制打回默认状态。
 
 ## 🚀 启动与调试入口

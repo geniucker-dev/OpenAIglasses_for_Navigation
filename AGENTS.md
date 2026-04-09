@@ -1,8 +1,10 @@
 # AI智能盲人眼镜系统 (AIGlasses for Navigation)
 
-**Generated:** 2026-04-07
+**Generated:** 2026-04-09
 **Commit:** (latest)
 **Branch:** main
+
+> ⚠️ **做任何修改前先看 AGENTS.md**。本项目约定、架构、关键符号、反模式都在这里。修改文件前务必确认 WHERE TO LOOK 和 CODE MAP，避免重复造轮子或破坏既有模式。
 
 ## OVERVIEW
 
@@ -17,11 +19,31 @@
 ├── workflow_blindpath.py    # 盲道导航：YOLO分割 + 光流稳定 + 避障
 ├── workflow_crossstreet.py  # 过马路：斑马线检测 + 红绿灯识别
 ├── yolomedia.py             # 物品查找：YOLO-E开放词汇 + MediaPipe手部追踪
+├── yoloe_backend.py         # YOLO-E 后端：开放词汇检测封装（MPS float64守卫）
+├── obstacle_detector_client.py # 障碍物检测客户端（MPS float64守卫 + bf16善后）
+├── trafficlight_detection.py # 红绿灯YOLO检测
+├── models.py                # 模型加载统一入口
 ├── asr_core.py              # 实时语音识别（DashScope Paraformer）
 ├── omni_client.py           # Qwen-Omni多模态对话
 ├── audio_player.py          # 多路音频混音播放
-├── device_utils.py          # 设备选择 (CUDA/MPS/CPU)
+├── audio_compressor.py      # 音频压缩
+├── audio_stream.py          # /stream.wav HTTP音频流
+├── bridge_io.py             # 原始/处理后画面桥接
+├── sync_recorder.py         # 音视频同步录制
+├── device_utils.py          # 设备选择 (CUDA/ROCm/MPS/CPU) + AMP + GPU并发限流
+├── crosswalk_awareness.py   # 斑马线感知
+├── qwen_extractor.py        # Qwen标签提取
+├── qwenturbo_template.py    # Qwen-Turbo提示模板
+├── utils.py                 # 通用工具函数
+├── templates/
+│   └── index.html           # Web监控界面（含滚动聊天面板）
 ├── static/                  # 前端JS/CSS（Web监控界面）
+│   ├── main.js              # 前端主逻辑
+│   ├── vision.js            # 视频流渲染
+│   ├── visualizer.js        # IMU 3D可视化
+│   ├── vision_renderer.js   # 渲染器工具
+│   ├── vision.css           # 样式
+│   └── AGENTS.md            # 前端补充文档
 ├── compile/                 # ESP32固件（PlatformIO项目）
 │   ├── compile.ino          # 主程序
 │   ├── platformio.ini       # PlatformIO配置
@@ -50,17 +72,21 @@
 
 | 符号 | 类型 | 位置 | 角色 |
 |------|------|------|------|
-| `NavigationMaster` | Class | navigation_master.py:245 | 状态机统领 |
+| `NavigationMaster` | Class | navigation_master.py:316 | 状态机统领 |
 | `BlindPathNavigator` | Class | workflow_blindpath.py:86 | 盲道导航核心 |
-| `TrafficLightDetector` | Class | navigation_master.py:60 | 红绿灯检测 |
-| `OrchestratorResult` | Class | navigation_master.py:28 | 导航结果封装 |
-| `load_navigation_models` | Func | app_main.py:119 | 模型加载入口 |
-| `start_ai_with_text_custom` | Func | app_main.py:410 | 语音指令处理 |
-| `ws_camera_esp` | Func | app_main.py:863 | ESP32视频WebSocket |
-| `process_imu_and_maybe_store` | Func | app_main.py:1130 | IMU数据处理 |
-| `get_device` | Func | device_utils.py:17 | 设备自动选择 |
-| `DEVICE` | Var | device_utils.py:94 | 全局设备字符串 |
-| `gpu_infer_slot` | Func | device_utils.py:141 | GPU并发限流+AMP |
+| `TrafficLightDetector` | Class | navigation_master.py:69 | 红绿灯检测 |
+| `OrchestratorResult` | Class | navigation_master.py:32 | 导航结果封装 |
+| `YoloEBackend` | Class | yoloe_backend.py:18 | YOLO-E开放词汇检测后端 |
+| `ObstacleDetectorClient` | Class | obstacle_detector_client.py:16 | 障碍物检测客户端 |
+| `load_navigation_models` | Func | app_main.py:137 | 模型加载入口 |
+| `start_ai_with_text_custom` | Func | app_main.py:548 | 语音指令处理 |
+| `ws_camera_esp` | Func | app_main.py:1120 | ESP32视频WebSocket |
+| `process_imu_and_maybe_store` | Func | app_main.py:1449 | IMU数据处理 |
+| `get_device` | Func | device_utils.py:24 | 设备自动选择 |
+| `DEVICE` | Var | device_utils.py:105 | 全局设备字符串 |
+| `IS_ROCM` | Var | device_utils.py:110 | ROCm/AMD GPU标识 |
+| `AMP_DTYPE` | Var | device_utils.py:140 | AMP数据类型（bf16/fp16/None） |
+| `gpu_infer_slot` | Func | device_utils.py:148 | GPU并发限流+AMP |
 
 ### ESP32 固件 (compile/)
 
@@ -97,11 +123,15 @@
 ### 环境变量
 - **必需**: `DASHSCOPE_API_KEY` (阿里云ASR/Qwen)
 - 可选调参: `AIGLASS_MASK_MIN_AREA`, `AIGLASS_PANEL_SCALE`, `AIGLASS_DEVICE`
+- 可选AMP: `AIGLASS_AMP` (auto/bf16/fp16/off，默认auto)
+- 可选GPU并发: `AIGLASS_GPU_SLOTS` (默认2)
 
-### 设备选择 (CUDA > MPS > CPU 自动 Fallback)
-- 系统自动选择最佳计算设备：CUDA (NVIDIA GPU) > MPS (Apple Silicon) > CPU
+### 设备选择 (CUDA > ROCm > MPS > CPU 自动 Fallback)
+- 系统自动选择最佳计算设备：CUDA (NVIDIA GPU) > ROCm (AMD GPU) > MPS (Apple Silicon) > CPU
 - 强制指定设备：设置环境变量 `AIGLASS_DEVICE=cuda` / `mps` / `cpu`
+- **ROCm (AMD GPU)**：通过 `IS_ROCM` 标识自动检测，ROCm 下不开启 `cudnn.benchmark`（MIOpen autotuning 比 NVIDIA cuDNN 慢几个数量级）
 - AMP 自动混合精度：CUDA 支持 bf16/fp16，MPS 支持 fp16
+- GPU 并发限流：`gpu_infer_slot()` 信号量控制，默认 2 槽位
 - 配置文件: `device_utils.py`
 - 这里描述的是**运行时设备选择**；PyTorch 的安装推荐交给 `uv pip --torch-backend=auto` 处理
 
@@ -184,6 +214,18 @@ uv run python test_recorder.py
 - 详细文档见 `compile/AGENTS.md`
 
 ## RECENT FIXES
+
+### 2026-04-09: NCNN 迁移回退 / ROCm 性能修复 / 前端滚动修复
+
+#### 已完成修复
+- **NCNN 迁移放弃**：revert 了全部 9 个 NCNN 相关提交，保留纯 PyTorch 推理路径。NCNN 无关的改动（固件服务器地址、ROCm cudnn.benchmark 修复）已单独加回。
+- **ROCm MIOpen autotuning 修复**：`device_utils.py` 新增 `IS_ROCM` 标识，ROCm/AMD GPU 上不再开启 `cudnn.benchmark`，避免 MIOpen autotuning 比 NVIDIA cuDNN 慢几个数量级导致的卡顿。
+- **前端聊天面板滚动修复**：`templates/index.html` 的 CSS 布局链修复——`.chat` 添加 `max-height`，`#chatContainer` 成为唯一滚动容器，`scrollTop = scrollHeight` 自动滚到底部。最终文本框不再随消息增加无限变长。
+
+#### 代码审查结论
+- MPS float64 特殊处理（`yoloe_backend.py:30-38`、`obstacle_detector_client.py:58-67`）正确守卫，仅在 `device == "mps"` 时触发，CUDA 不走。
+- CUDA 上所有 `.cpu()` 调用都是推理后 tensor→NumPy 的标准转换，无多余 CPU 回退。
+- bf16 使用正确：`AMP_DTYPE` 在 CUDA Ampere+ 上默认 `torch.bfloat16`，由 `gpu_infer_slot()` 的 `torch.amp.autocast` 全局生效；三处 `bfloat16 → float32` 转换（`workflow_blindpath.py:849`、`obstacle_detector_client.py:89,141`）是配套善后，因为 numpy 不支持 bfloat16。
 
 ### 2026-04-08: MPS / 状态保留 / 调试入口文档同步
 

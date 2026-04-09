@@ -12,6 +12,10 @@
 - 完整的 GitHub 文档（README, CONTRIBUTING, LICENSE 等）
 - Docker 支持
 - 环境变量配置模板
+- AMD GPU (ROCm) 支持：自动检测 `IS_ROCM`，MIOpen 下禁用 `cudnn.benchmark`
+- AMP 自动混合精度：`AIGLASS_AMP` 环境变量（auto/bf16/fp16/off），CUDA Ampere+ 默认 bf16
+- GPU 并发限流：`AIGLASS_GPU_SLOTS` 环境变量，`gpu_infer_slot()` 信号量控制
+- `device_utils.py` 新增 `IS_ROCM`、`AMP_DTYPE`、`gpu_infer_slot()` 等统一设备管理
 
 ### 修改
 - 优化了 README 文档结构
@@ -20,12 +24,17 @@
 - 记录 2026-04 的 ESP32 ⇄ 服务端传输链路复盘与协议评估结论
 - 更新 README/AGENTS/static/AGENTS/PROJECT_STRUCTURE，补充调试输入框、MPS 推理、状态保留与语音映射回退说明
 - 安装文档改为：默认 `uv sync` 只同步核心依赖，PyTorch / Ultralytics / CLIP 改为用 `uv pip --torch-backend=auto` 单独安装
+- 设备选择文档更新为 CUDA > ROCm > MPS > CPU 四级 fallback
+- 固件服务器地址更新为 `ece445_server.geniucker.top`
 
 ### 修复
 - 标注文档中过时的安装方式与目录结构描述，改为当前仓库实际状态
 - 过马路分割与红绿灯检测文档改为当前 MPS / CPU 自动选择实现
-- 标注文档中过时的“macOS 上缺少 GPU 加速支持”描述，改为 Apple Silicon 上支持 MPS
+- 标注文档中过时的"macOS 上缺少 GPU 加速支持"描述，改为 Apple Silicon 上支持 MPS
 - 同步相机断线重连后状态保持、语音映射回退、前端手机端布局调整等最近修复
+- ROCm/AMD GPU 上禁用 `cudnn.benchmark`，避免 MIOpen autotuning 导致推理卡顿
+- 前端聊天面板滚动修复：AI 回复面板不再随消息增加无限变长，`#chatContainer` 成为唯一滚动容器
+- 回退全部 NCNN 迁移提交，恢复纯 PyTorch 推理路径
 
 ## [1.0.0] - 2025-01-XX
 

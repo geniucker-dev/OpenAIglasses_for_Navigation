@@ -68,7 +68,7 @@
 ### 硬件要求
 - **开发/服务器端**：
   - CPU: Intel i5 或以上（推荐 i7/i9）
-  - GPU: 可选。NVIDIA GPU（CUDA）、Apple Silicon（MPS）或纯 CPU 均可运行；如需更高帧率，推荐 RTX 3060 或以上
+  - GPU: 可选。NVIDIA GPU（CUDA）、AMD GPU（ROCm）、Apple Silicon（MPS）或纯 CPU 均可运行；如需更高帧率，推荐 RTX 3060 或以上
   - 内存: 8GB RAM（推荐 16GB）
   - 存储: 10GB 可用空间
 
@@ -111,6 +111,7 @@ uv pip install --torch-backend=auto torch torchvision ultralytics "clip @ git+ht
 - `uv pip --torch-backend=auto` 会为当前机器自动选择合适的 PyTorch 安装来源（如 CPU / CUDA / ROCm）。
 - macOS / Apple Silicon 不存在单独的 “MPS wheel”；安装 macOS 版 PyTorch 后，程序运行时会自动检测并使用 `mps`。
 - 如需 NVIDIA GPU 加速，请先确保本机 CUDA 驱动环境正常，再执行上面的安装命令。
+- 如需 AMD GPU 加速（ROCm），请先安装 ROCm 5.0+ 驱动，`uv pip --torch-backend=auto` 会自动识别 ROCm 环境。注意：ROCm 下系统会自动禁用 `cudnn.benchmark`（MIOpen autotuning 较慢），无需手动配置。
 - Linux 若安装 `pyaudio` 失败并提示缺少 `portaudio.h`，请先安装系统依赖，例如 Ubuntu / Debian 使用 `sudo apt install portaudio19-dev python3-dev`。
 
 ### 3. 下载模型文件
@@ -352,6 +353,7 @@ uv run pio run --target upload
 - **IMU 可视化**：设备姿态 3D 实时渲染
 - **语音识别结果**：显示识别的文字和 AI 回复
 - **调试输入框**：可直接向服务端发送文本指令，绕过 ASR 便于调试状态机与语音命令
+- **聊天面板滚动**：AI 回复面板自动滚动到底部，不会随消息增加无限变长
 
 ### 实时传输端点
 
@@ -397,6 +399,12 @@ DASHSCOPE_API_KEY=sk-xxxxx
 
 # 设备选择（可选：cuda / mps / cpu）
 AIGLASS_DEVICE=mps
+
+# AMP 混合精度（可选：auto / bf16 / fp16 / off，默认 auto）
+AIGLASS_AMP=auto
+
+# GPU 并发限流（可选，默认 2）
+AIGLASS_GPU_SLOTS=2
 
 # 模型路径（可选，使用默认路径可不配置）
 BLIND_PATH_MODEL=model/yolo-seg.pt
