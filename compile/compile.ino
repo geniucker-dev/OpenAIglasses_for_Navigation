@@ -65,11 +65,15 @@ const int TTS_RATE = 16000;
 
 // ===== IMU (ICM42688 over SPI) / UDP =====
 // 使用 D0~D3 作为 SPI
-#define IMU_SPI_SCK   1   // D0
+// #define IMU_SPI_SCK   1   // D0
+// #define IMU_SPI_MOSI  2   // D1
+// #define IMU_SPI_MISO  3   // D2
+// #define IMU_SPI_CS    4   // D3
+#define IMU_SPI_MISO  1   // D0
 #define IMU_SPI_MOSI  2   // D1
-#define IMU_SPI_MISO  3   // D2
+#define IMU_SPI_SCK   3   // D2
 #define IMU_SPI_CS    4   // D3
-const char* UDP_HOST  = "Mac.lan";
+const char* UDP_HOST  = "ece445_server.geniucker.top";
 const int   UDP_PORT  = 12345;
 
 WiFiUDP udp;
