@@ -8,6 +8,7 @@ import wave
 import numpy as np
 import threading
 import time
+import ctypes
 from datetime import datetime
 from collections import deque
 import struct
@@ -56,6 +57,12 @@ class SyncRecorder:
         self.frames_written = 0
         self.audio_bytes_written = 0
         self.last_log_time = time.time()
+
+        # 音频异步写入队列
+        self.audio_queue = deque()
+        self.audio_queue_cond = threading.Condition()
+        self.audio_worker_thread = None
+        self.audio_worker_stop = False
         
         print(f"[RECORDER] 录制器初始化完成 - FPS={fps}, 输出目录={output_dir}")
     
@@ -63,6 +70,10 @@ class SyncRecorder:
         """开始新的录制会话"""
         if self.is_recording:
             print("[RECORDER] 警告：已经在录制中")
+            return False
+
+        if self.audio_worker_thread is not None and self.audio_worker_thread.is_alive():
+            print("[RECORDER] 警告：上一次音频写入线程仍未退出")
             return False
         
         # 生成文件名（时间戳）
@@ -78,6 +89,9 @@ class SyncRecorder:
         self.audio_bytes_written = 0
         self.audio_buffer.clear()
         self.last_frame = None
+        with self.audio_queue_cond:
+            self.audio_queue.clear()
+            self.audio_worker_stop = False
         
         # 初始化音频文件
         try:
@@ -86,14 +100,93 @@ class SyncRecorder:
             self.audio_writer.setsampwidth(self.sample_width)
             self.audio_writer.setframerate(self.sample_rate)
         except Exception as e:
+            try:
+                if self.audio_writer is not None:
+                    self.audio_writer.close()
+            except Exception:
+                pass
+            finally:
+                self.audio_writer = None
             print(f"[RECORDER] 音频文件初始化失败: {e}")
             return False
         
         self.is_recording = True
+        try:
+            self._ensure_audio_worker()
+        except Exception as e:
+            self.is_recording = False
+            try:
+                if self.audio_writer is not None:
+                    self.audio_writer.close()
+            except Exception:
+                pass
+            finally:
+                self.audio_writer = None
+            print(f"[RECORDER] 音频写入线程启动失败: {e}")
+            return False
         print(f"[RECORDER] 开始录制")
         print(f"  视频: {self.video_path}")
         print(f"  音频: {self.audio_path}")
         return True
+
+    def _ensure_audio_worker(self):
+        if self.audio_worker_thread is not None and self.audio_worker_thread.is_alive():
+            return
+
+        self.audio_worker_thread = threading.Thread(
+            target=self._audio_worker_loop,
+            daemon=True,
+            name="SyncRecorderAudioWriter",
+        )
+        self.audio_worker_thread.start()
+
+    def _audio_worker_loop(self):
+        while True:
+            with self.audio_queue_cond:
+                while not self.audio_queue and not self.audio_worker_stop:
+                    self.audio_queue_cond.wait()
+
+                if self.audio_queue:
+                    pcm_data, text, video_time = self.audio_queue.popleft()
+                elif self.audio_worker_stop:
+                    break
+                else:
+                    continue
+
+            self._write_audio(pcm_data, text, video_time)
+
+    def _force_stop_audio_worker(self, worker: threading.Thread) -> bool:
+        ident = worker.ident
+        if ident is None:
+            return False
+        try:
+            result = ctypes.pythonapi.PyThreadState_SetAsyncExc(
+                ctypes.c_ulong(ident), ctypes.py_object(SystemExit)
+            )
+            if result == 0:
+                return False
+            if result > 1:
+                ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_ulong(ident), None)
+                return False
+            worker.join(timeout=1.0)
+            return not worker.is_alive()
+        except Exception as e:
+            print(f"[RECORDER] 强制停止音频线程失败: {e}")
+            return False
+
+    def _write_audio(self, pcm_data: bytes, text: str, video_time: float):
+        try:
+            with self.lock:
+                self._sync_audio_to_video(video_time)
+                self.audio_writer.writeframes(pcm_data)
+                audio_duration = len(pcm_data) / (self.sample_rate * self.sample_width)
+                self.last_audio_time = video_time + audio_duration
+                self.audio_bytes_written += len(pcm_data)
+
+                if text:
+                    print(f"[RECORDER] 录制语音: {text[:30]}... (时间={video_time:.2f}s, 时长={audio_duration:.2f}s)")
+        except Exception as e:
+            print(f"[RECORDER] 添加音频失败: {e}")
     
     def add_frame(self, jpeg_data: bytes):
         """
@@ -101,8 +194,13 @@ class SyncRecorder:
         :param jpeg_data: JPEG格式的图像数据
         """
         if not self.is_recording:
-            return
+            return True
         
+        class _VideoInitFailed(Exception):
+            pass
+
+        video_init_failed = False
+
         try:
             with self.lock:
                 # 解码JPEG
@@ -111,7 +209,7 @@ class SyncRecorder:
                 
                 if frame is None:
                     print(f"[RECORDER] 警告：帧解码失败")
-                    return
+                    return False
                 
                 # 首帧：初始化视频写入器
                 if self.video_writer is None:
@@ -128,7 +226,9 @@ class SyncRecorder:
                     if not self.video_writer.isOpened():
                         print(f"[RECORDER] 错误：视频写入器初始化失败")
                         self.is_recording = False
-                        return
+                        video_init_failed = True
+                        self.video_writer = None
+                        raise _VideoInitFailed()
                     
                     print(f"[RECORDER] 视频写入器初始化：{width}x{height} @ {self.fps}fps")
                 
@@ -156,10 +256,40 @@ class SyncRecorder:
                           f"音频时长={audio_duration:.1f}s")
                     self.last_log_time = now
                     
+        except _VideoInitFailed:
+            pass
         except Exception as e:
             print(f"[RECORDER] 添加帧失败: {e}")
             import traceback
             traceback.print_exc()
+            return False
+
+        if video_init_failed:
+            with self.audio_queue_cond:
+                self.audio_worker_stop = True
+                self.audio_queue.clear()
+                self.audio_queue_cond.notify_all()
+
+            worker = self.audio_worker_thread
+            if worker is not None and worker.is_alive():
+                worker.join(timeout=5.0)
+            if worker is not None and worker.is_alive():
+                print("[RECORDER] 音频写入线程未在视频初始化失败后退出")
+                if self._force_stop_audio_worker(worker):
+                    print("[RECORDER] 音频写入线程已在视频初始化失败后强制停止")
+                    self.audio_worker_thread = None
+            else:
+                self.audio_worker_thread = None
+
+            try:
+                with self.lock:
+                    if self.audio_writer is not None:
+                        self.audio_writer.close()
+                        self.audio_writer = None
+            except Exception as close_err:
+                print(f"[RECORDER] 关闭音频写入器失败: {close_err}")
+            return False
+        return True
     
     def add_audio(self, pcm_data: bytes, text: str = ""):
         """
@@ -169,24 +299,14 @@ class SyncRecorder:
         """
         if not self.is_recording:
             return
-        
+
         try:
             with self.lock:
-                # 当前视频时长
                 current_video_time = self.frame_count * self.frame_duration
-                
-                # 在添加音频前，先填充静音到视频时长
-                self._sync_audio_to_video(current_video_time)
-                
-                # 写入实际音频
-                self.audio_writer.writeframes(pcm_data)
-                audio_duration = len(pcm_data) / (self.sample_rate * self.sample_width)
-                self.last_audio_time = current_video_time + audio_duration
-                self.audio_bytes_written += len(pcm_data)
-                
-                if text:
-                    print(f"[RECORDER] 录制语音: {text[:30]}... (时间={current_video_time:.2f}s, 时长={audio_duration:.2f}s)")
-                    
+
+            with self.audio_queue_cond:
+                self.audio_queue.append((pcm_data, text, current_video_time))
+                self.audio_queue_cond.notify()
         except Exception as e:
             print(f"[RECORDER] 添加音频失败: {e}")
     
@@ -211,12 +331,52 @@ class SyncRecorder:
     
     def stop_recording(self):
         """停止录制并保存文件"""
-        if not self.is_recording:
-            return
+        worker = self.audio_worker_thread
+        if not self.is_recording and not (worker is not None and worker.is_alive()):
+            return True
         
         print("[RECORDER] 正在保存录制文件...")
         self.is_recording = False
-        
+
+        with self.audio_queue_cond:
+            self.audio_worker_stop = True
+            self.audio_queue_cond.notify_all()
+
+        if worker is not None and worker.is_alive():
+            worker.join(timeout=5.0)
+        if worker is not None and worker.is_alive():
+            print("[RECORDER] 音频写入线程未在超时内退出")
+            if worker.is_alive():
+                if self._force_stop_audio_worker(worker):
+                    print("[RECORDER] 音频写入线程已强制停止")
+            if worker.is_alive():
+                return False
+            with self.lock:
+                if self.video_writer is not None:
+                    try:
+                        print("[RECORDER] 正在关闭视频写入器...")
+                        self.video_writer.release()
+                        print("[RECORDER] 视频写入器已关闭")
+                    except Exception as e:
+                        print(f"[RECORDER] 关闭视频写入器失败: {e}")
+                    finally:
+                        self.video_writer = None
+                if self.audio_writer is not None:
+                    try:
+                        print("[RECORDER] 正在关闭音频写入器...")
+                        self.audio_writer.close()
+                        print("[RECORDER] 音频写入器已关闭")
+                    except Exception as e:
+                        print(f"[RECORDER] 关闭音频写入器失败: {e}")
+                    finally:
+                        self.audio_writer = None
+            self.audio_worker_thread = None
+            if not worker.is_alive():
+                self.audio_worker_thread = None
+            return False
+        self.audio_worker_thread = None
+        cleanup_ok = True
+          
         with self.lock:
             # 最后一次音频同步
             try:
@@ -234,6 +394,7 @@ class SyncRecorder:
                     print("[RECORDER] 视频写入器已关闭")
                 except Exception as e:
                     print(f"[RECORDER] 关闭视频写入器失败: {e}")
+                    cleanup_ok = False
                 finally:
                     self.video_writer = None
             
@@ -245,6 +406,7 @@ class SyncRecorder:
                     print("[RECORDER] 音频写入器已关闭")
                 except Exception as e:
                     print(f"[RECORDER] 关闭音频写入器失败: {e}")
+                    cleanup_ok = False
                 finally:
                     self.audio_writer = None
             
@@ -285,6 +447,8 @@ class SyncRecorder:
             except Exception as e:
                 print(f"[RECORDER] 显示统计信息失败: {e}")
 
+        return cleanup_ok
+
 
 # 全局录制器实例
 _global_recorder = None
@@ -306,17 +470,17 @@ def start_recording():
 def stop_recording():
     """停止录制"""
     recorder = get_recorder()
-    recorder.stop_recording()
+    return recorder.stop_recording()
 
 def record_frame(jpeg_data: bytes):
     """记录一帧（供外部调用）"""
     recorder = get_recorder()
     if recorder.is_recording:
-        recorder.add_frame(jpeg_data)
+        return recorder.add_frame(jpeg_data)
+    return True
 
 def record_audio(pcm_data: bytes, text: str = ""):
     """记录音频（供外部调用）"""
     recorder = get_recorder()
     if recorder.is_recording:
         recorder.add_audio(pcm_data, text)
-
