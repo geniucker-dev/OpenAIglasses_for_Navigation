@@ -61,6 +61,7 @@ Thumbs.db
 .pytest_cache/
 .coverage
 htmlcov/
+recordings_test*/
 
 # Misc
 mobileclip_blt.ts
