@@ -4,6 +4,7 @@ import os, sys, time, json, asyncio, base64, audioop
 from typing import Any, Dict, Optional, Tuple, List, Callable, Set, Deque
 from collections import deque
 from dataclasses import dataclass
+from contextlib import asynccontextmanager
 import re
 
 # 在其它 import 之后加：
@@ -73,24 +74,38 @@ from audio_stream import (
     is_playing_now,
     current_ai_task,
 )
-from omni_client import stream_chat, OmniStreamPiece
+from omni_client import stream_chat, OmniStreamPiece, cleanup_producer_threads
 from asr_core import (
     ASRCallback,
     set_current_recognition,
     stop_current_recognition,
 )
-from audio_player import initialize_audio_system, play_voice_text
+from audio_player import initialize_audio_system, play_voice_text, shutdown_audio_system, sanitize_audio_system_state
 
 # ---- 同步录制器 ----
 import sync_recorder
-import signal
-import atexit
 
 # ---- IMU UDP ----
 UDP_IP = "0.0.0.0"
 UDP_PORT = 12345
 
-app = FastAPI()
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    await on_startup_register_bridge_sender()
+    try:
+        await on_startup()
+    except Exception:
+        bridge_io.set_sender(None)
+        bridge_io.clear_frames()
+        raise
+    try:
+        yield
+    finally:
+        await on_shutdown()
+
+
+app = FastAPI(lifespan=lifespan)
 
 # ====== 状态与容器 ======
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -113,9 +128,13 @@ camera_connected_at: float = 0.0
 camera_last_frame_at: float = 0.0
 camera_status_cache: Optional[str] = None
 camera_status_task: Optional[asyncio.Task[Any]] = None
+imu_broadcast_tasks: Set[asyncio.Task[Any]] = set()
+imu_accepting_packets: bool = False
+imu_transport: Optional[asyncio.DatagramTransport] = None
 esp32_audio_last_frame_at: float = 0.0
 asr_streaming_active: bool = False
 asr_status_cache: Optional[str] = None
+active_asr_stop_fn: Optional[Callable[[], Any]] = None
 
 # 【新增】盲道导航相关全局变量
 blind_path_navigator = None
@@ -127,10 +146,41 @@ obstacle_detector = None
 cross_street_navigator = None
 cross_street_active = False
 orchestrator = None  # 新增
+startup_ready = False
 
 # 【新增】omni对话状态标志
 omni_conversation_active = False  # 标记omni对话是否正在进行
 omni_previous_nav_state = None  # 保存omni激活前的导航状态，用于恢复
+omni_session_generation = 0
+
+def reset_ui_session_state():
+    global current_partial, recent_finals, camera_status_cache, asr_status_cache, omni_conversation_active, omni_previous_nav_state
+    current_partial = ""
+    recent_finals = []
+    camera_status_cache = None
+    asr_status_cache = None
+    omni_conversation_active = False
+    omni_previous_nav_state = None
+
+def bump_omni_generation():
+    global omni_session_generation
+    omni_session_generation += 1
+    return omni_session_generation
+
+def clear_navigation_session_state():
+    global blind_path_navigator, cross_street_navigator, orchestrator, navigation_active, cross_street_active
+    blind_path_navigator = None
+    cross_street_navigator = None
+    orchestrator = None
+    navigation_active = False
+    cross_street_active = False
+
+def reset_trafficlight_runtime_state():
+    try:
+        import trafficlight_detection
+        return trafficlight_detection.reset_runtime_state()
+    except Exception:
+        return False
 
 
 # 【新增】模型加载函数
@@ -161,6 +211,7 @@ def load_navigation_models():
                     print(f"[NAVIGATION] 模型类别: {yolo_seg_model.names}")
             except Exception as e:
                 print(f"[NAVIGATION] 模型测试失败: {e}")
+                yolo_seg_model = None
         else:
             print(f"[NAVIGATION] 错误：找不到模型文件: {seg_model_path}")
             print(f"[NAVIGATION] 当前工作目录: {os.getcwd()}")
@@ -234,6 +285,7 @@ def load_navigation_models():
                     import traceback
 
                     traceback.print_exc()
+                    obstacle_detector = None
 
                 print(f"[NAVIGATION] ========== YOLO-E 障碍物检测器加载完成 ==========")
 
@@ -253,66 +305,10 @@ def load_navigation_models():
         traceback.print_exc()
 
 
-# 在程序启动时加载模型
-print("[NAVIGATION] 开始加载导航模型...")
-load_navigation_models()
-print(f"[NAVIGATION] 模型加载完成 - yolo_seg_model: {yolo_seg_model is not None}")
-
-# 【新增】启动同步录制
-print("[RECORDER] 启动同步录制系统...")
-sync_recorder.start_recording()
-print("[RECORDER] 录制系统已启动，将自动保存视频和音频")
-
-
-# 【新增】注册退出处理器，确保Ctrl+C时保存录制文件
-def cleanup_on_exit():
-    """程序退出时的清理工作"""
-    print("\n[SYSTEM] 正在关闭录制器...")
-    try:
-        sync_recorder.stop_recording()
-        print("[SYSTEM] 录制文件已保存")
-    except Exception as e:
-        print(f"[SYSTEM] 关闭录制器时出错: {e}")
-
-
-def signal_handler(sig, frame):
-    """处理Ctrl+C信号"""
-    print("\n[SYSTEM] 收到中断信号，正在安全退出...")
-    cleanup_on_exit()
-    import sys
-
-    sys.exit(0)
-
-
-# 注册信号处理器
-signal.signal(signal.SIGINT, signal_handler)  # Ctrl+C
-signal.signal(signal.SIGTERM, signal_handler)  # 终止信号
-atexit.register(cleanup_on_exit)  # 正常退出时也调用
-
-print("[RECORDER] 已注册退出处理器 - Ctrl+C时会自动保存录制文件")
-
-
-# 【新增】预加载红绿灯检测模型（避免进入WAIT_TRAFFIC_LIGHT状态时卡顿）
-try:
-    import trafficlight_detection
-
-    print("[TRAFFIC_LIGHT] 开始预加载红绿灯检测模型...")
-    if trafficlight_detection.init_model():
-        print("[TRAFFIC_LIGHT] 红绿灯检测模型预加载成功")
-        # 执行一次测试推理，完全预热模型
-        try:
-            test_img = np.zeros((640, 640, 3), dtype=np.uint8)
-            _ = trafficlight_detection.process_single_frame(test_img)
-            print("[TRAFFIC_LIGHT] 模型预热完成")
-        except Exception as e:
-            print(f"[TRAFFIC_LIGHT] 模型预热失败: {e}")
-    else:
-        print("[TRAFFIC_LIGHT] 红绿灯检测模型预加载失败")
-except Exception as e:
-    print(f"[TRAFFIC_LIGHT] 红绿灯模型预加载出错: {e}")
-
 # ============== 关键：系统级"硬重置"总闸 =================
 interrupt_lock = asyncio.Lock()
+audio_ws_claim_lock = asyncio.Lock()
+camera_ws_claim_lock = asyncio.Lock()
 
 # ============== YOLO媒体线程管理 =================
 yolomedia_thread: Optional[threading.Thread] = None
@@ -381,7 +377,10 @@ async def broadcast_camera_status(force: bool = False):
 
 def get_asr_status_payload() -> Dict[str, Any]:
     now = time.time()
-    if esp32_audio_ws is None:
+    if esp32_audio_ws is None and active_asr_stop_fn is not None:
+        state = "error"
+        text = "ASR: cleanup incomplete"
+    elif esp32_audio_ws is None:
         state = "disconnected"
         text = "ASR: audio device disconnected"
     elif (
@@ -435,7 +434,7 @@ async def ui_broadcast_final(text: str):
     print(f"[ASR/AI FINAL] {text}", flush=True)
 
 
-async def full_system_reset(reason: str = ""):
+async def full_system_reset(reason: str = "") -> bool:
     """
     回到刚启动后的状态：
     1) 停播 + 取消AI任务 + 切断所有/stream.wav（hard_reset_audio）
@@ -444,16 +443,44 @@ async def full_system_reset(reason: str = ""):
     4) 清最近相机帧（避免把旧帧又拼进下一轮）
     5) 告知 ESP32：RESET（可选）
     """
+    global active_asr_stop_fn, asr_streaming_active, esp32_audio_last_frame_at
+
+    bump_omni_generation()
+    reset_ui_session_state()
+
     # 1) 音频&AI
     await hard_reset_audio(reason or "full_system_reset")
+    omni_threads_clean = cleanup_producer_threads()
 
     # 2) ASR
-    await stop_current_recognition()
+    recognition_stopped = True
+    if active_asr_stop_fn is not None:
+        recognition_stopped = await active_asr_stop_fn()
+    else:
+        recognition_stopped = await stop_current_recognition()
+        if recognition_stopped:
+            active_asr_stop_fn = None
+            asr_streaming_active = False
+            esp32_audio_last_frame_at = 0.0
+    if not recognition_stopped:
+        print("[SYSTEM] full reset incomplete: recognition stop failed.", flush=True)
+    if not omni_threads_clean:
+        print("[SYSTEM] full reset incomplete: omni producer thread still alive.", flush=True)
+
+    reset_imu_runtime_state()
+    traffic_reset_ok = reset_trafficlight_runtime_state()
+    bridge_io.clear_frames()
+
+    # 2.5) 停止运行中的找物品线程
+    yolomedia_stopped = stop_yolomedia()
+    if not yolomedia_stopped:
+        print("[SYSTEM] full reset incomplete: yolomedia still running.", flush=True)
+
+    if yolomedia_stopped:
+        clear_navigation_session_state()
 
     # 3) UI
-    global current_partial, recent_finals
-    current_partial = ""
-    recent_finals = []
+    await ui_broadcast_raw("RESET_UI")
     await ui_broadcast_partial("")
 
     # 4) 相机帧
@@ -469,11 +496,18 @@ async def full_system_reset(reason: str = ""):
     except Exception:
         pass
 
-    print("[SYSTEM] full reset done.", flush=True)
+    if not traffic_reset_ok:
+        print("[SYSTEM] full reset incomplete: traffic-light runtime reset failed.", flush=True)
+
+    if yolomedia_stopped and recognition_stopped and traffic_reset_ok and omni_threads_clean:
+        print("[SYSTEM] full reset done.", flush=True)
+    else:
+        print("[SYSTEM] full reset incomplete.", flush=True)
+    return bool(yolomedia_stopped and recognition_stopped and traffic_reset_ok and omni_threads_clean)
 
 
 # ========= 启动/停止 YOLO 媒体处理 =========
-def start_yolomedia_with_target(target_name: str):
+def start_yolomedia_with_target(target_name: str) -> bool:
     """启动yolomedia线程，搜索指定物品"""
     global \
         yolomedia_thread, \
@@ -483,7 +517,8 @@ def start_yolomedia_with_target(target_name: str):
 
     # 如果已经在运行，先停止
     if yolomedia_running:
-        stop_yolomedia()
+        if not stop_yolomedia():
+            return False
 
     # 查找对应的YOLO类别
     yolo_class = ITEM_TO_CLASS_MAP.get(target_name, target_name)
@@ -498,8 +533,10 @@ def start_yolomedia_with_target(target_name: str):
     yolomedia_stop_event.clear()
     yolomedia_running = True
     yolomedia_sending_frames = False  # 重置发送帧状态
+    worker_started = threading.Event()
 
     def _run():
+        worker_started.set()
         try:
             # 传递目标类别名和停止事件
             yolomedia.main(
@@ -514,13 +551,19 @@ def start_yolomedia_with_target(target_name: str):
 
     yolomedia_thread = threading.Thread(target=_run, daemon=True)
     yolomedia_thread.start()
+    worker_started.wait(timeout=0.2)
+    if yolomedia_thread is None or not yolomedia_thread.is_alive():
+        yolomedia_running = False
+        yolomedia_sending_frames = False
+        return False
     print(
         f"[YOLOMEDIA] background worker started for: {yolo_class}（正在初始化，暂时显示原始画面）",
         flush=True,
     )
+    return True
 
 
-def stop_yolomedia():
+def stop_yolomedia() -> bool:
     """停止yolomedia线程"""
     global \
         yolomedia_thread, \
@@ -536,12 +579,18 @@ def stop_yolomedia():
         if yolomedia_thread and yolomedia_thread.is_alive():
             yolomedia_thread.join(timeout=5.0)
 
+        if yolomedia_thread and yolomedia_thread.is_alive():
+            print("[YOLOMEDIA] Worker still alive after stop timeout.", flush=True)
+            return False
+
+        yolomedia_thread = None
         yolomedia_running = False
         yolomedia_sending_frames = False
 
         # 【新增】如果orchestrator在找物品模式，结束时不自动恢复（由命令控制）
         # 只清理标志位即可
         print("[YOLOMEDIA] Worker stopped, 等待状态切换.", flush=True)
+    return True
 
 
 # ========= 自定义的 start_ai_with_text，支持识别特殊命令 =========
@@ -601,7 +650,9 @@ async def start_ai_with_text_custom(user_text: str):
     if "开始过马路" in user_text or "帮我过马路" in user_text:
         # 【新增】如果正在找物品，先停止
         if yolomedia_running:
-            stop_yolomedia()
+            if not stop_yolomedia():
+                await ui_broadcast_final("[系统] 找物品任务仍在停止中，请稍后再试")
+                return
             print("[ITEM_SEARCH] 从找物品模式切换到过马路")
 
         if orchestrator:
@@ -632,19 +683,21 @@ async def start_ai_with_text_custom(user_text: str):
         try:
             import trafficlight_detection
 
-            # 切换orchestrator到红绿灯检测模式（暂停盲道导航）
-            if orchestrator:
+            # 【改进】使用主线程模式而不是独立线程，避免掉帧
+            success = trafficlight_detection.init_model()  # 只初始化模型，不启动线程
+            reset_ok = trafficlight_detection.reset_runtime_state(clear_model=False)  # 重置状态但保留模型
+
+            if success and reset_ok and orchestrator:
+                # 切换orchestrator到红绿灯检测模式（暂停盲道导航）
                 orchestrator.start_traffic_light_detection()
                 print(
                     f"[TRAFFIC] 切换到红绿灯检测模式，状态: {orchestrator.get_state()}"
                 )
-
-            # 【改进】使用主线程模式而不是独立线程，避免掉帧
-            success = trafficlight_detection.init_model()  # 只初始化模型，不启动线程
-            trafficlight_detection.reset_detection_state()  # 重置状态
-
-            if success:
                 await ui_broadcast_final("[系统] 红绿灯检测已启动")
+            elif success and reset_ok:
+                await ui_broadcast_final("[系统] 导航系统未就绪")
+            elif not reset_ok:
+                await ui_broadcast_final("[系统] 红绿灯运行态重置失败")
             else:
                 await ui_broadcast_final("[系统] 红绿灯模型加载失败")
         except Exception as e:
@@ -654,12 +707,16 @@ async def start_ai_with_text_custom(user_text: str):
 
     if "停止检测" in user_text or "停止红绿灯" in user_text:
         try:
+            if not reset_trafficlight_runtime_state():
+                raise RuntimeError("红绿灯检测运行态清理失败")
+
             # 恢复到对话模式
             if orchestrator:
                 orchestrator.stop_navigation()  # 回到CHAT模式
                 print(f"[TRAFFIC] 红绿灯检测停止，恢复到{orchestrator.get_state()}模式")
-
-            await ui_broadcast_final("[系统] 红绿灯检测已停止")
+                await ui_broadcast_final("[系统] 红绿灯检测已停止")
+            else:
+                await ui_broadcast_final("[系统] 导航系统未就绪")
         except Exception as e:
             print(f"[TRAFFIC] 停止红绿灯检测失败: {e}")
             await ui_broadcast_final(f"[系统] 停止失败: {e}")
@@ -669,7 +726,9 @@ async def start_ai_with_text_custom(user_text: str):
     if "开始导航" in user_text or "盲道导航" in user_text or "帮我导航" in user_text:
         # 【新增】如果正在找物品，先停止
         if yolomedia_running:
-            stop_yolomedia()
+            if not stop_yolomedia():
+                await ui_broadcast_final("[系统] 找物品任务仍在停止中，请稍后再试")
+                return
             print("[ITEM_SEARCH] 从找物品模式切换到盲道导航")
 
         if orchestrator:
@@ -725,15 +784,21 @@ async def start_ai_with_text_custom(user_text: str):
                 flush=True,
             )
 
-            # 【新增】切换到找物品模式（暂停导航）
-            if orchestrator:
-                orchestrator.start_item_search()
-                print(
-                    f"[ITEM_SEARCH] 已切换到找物品模式，状态: {orchestrator.get_state()}"
-                )
+            if not orchestrator:
+                await ui_broadcast_final("[系统] 导航系统未就绪")
+                return
 
+            # 【新增】切换到找物品模式（暂停导航）
             # 【关键】把英文类名传给 yolomedia（它会在找不到类时自动切 YOLOE）
-            start_yolomedia_with_target(label_en)
+            if not start_yolomedia_with_target(label_en):
+                await ui_broadcast_final("[找物品] 上一次找物品任务仍在停止中，请稍后再试。")
+                return
+
+            # 【新增】切换到找物品模式（暂停导航）
+            orchestrator.start_item_search()
+            print(
+                f"[ITEM_SEARCH] 已切换到找物品模式，状态: {orchestrator.get_state()}"
+            )
 
             # 给前端/语音来个确认反馈
             try:
@@ -747,7 +812,9 @@ async def start_ai_with_text_custom(user_text: str):
     if "找到了" in user_text or "拿到了" in user_text:
         print("[COMMAND] Found command detected", flush=True)
         # 停止yolomedia
-        stop_yolomedia()
+        if not stop_yolomedia():
+            await ui_broadcast_final("[找物品] 当前找物品任务仍在停止中，请稍后再试。")
+            return
 
         # 【新增】停止找物品模式，恢复之前的导航状态
         if orchestrator:
@@ -771,6 +838,18 @@ async def start_ai_with_text_custom(user_text: str):
 
         return
 
+    # 如果不是特殊命令，执行原有的AI对话逻辑
+    # 但如果yolomedia正在运行，暂时不处理普通对话
+    if yolomedia_running:
+        print("[AI] YOLO media is running, skipping normal AI response", flush=True)
+        return
+
+    if not cleanup_producer_threads():
+        await ui_broadcast_final("[系统] 上一次AI会话尚未完全清理，请稍后再试")
+        return
+
+    bump_omni_generation()
+
     # 【修改】omni对话开始时，切换到CHAT模式
     global omni_conversation_active, omni_previous_nav_state
     omni_conversation_active = True
@@ -787,12 +866,6 @@ async def start_ai_with_text_custom(user_text: str):
             omni_previous_nav_state = None
             print(f"[OMNI] 对话开始（当前已在{current_state}模式）")
 
-    # 如果不是特殊命令，执行原有的AI对话逻辑
-    # 但如果yolomedia正在运行，暂时不处理普通对话
-    if yolomedia_running:
-        print("[AI] YOLO media is running, skipping normal AI response", flush=True)
-        return
-
     # 原有的AI对话逻辑
     await start_ai_with_text(user_text)
 
@@ -800,6 +873,8 @@ async def start_ai_with_text_custom(user_text: str):
 # ========= Omni 播放启动 =========
 async def start_ai_with_text(user_text: str):
     """硬重置后，开启新的 AI 语音输出。"""
+    session_generation = omni_session_generation
+    task: Optional[asyncio.Task[Any]] = None
 
     async def _runner():
         txt_buf: List[str] = []
@@ -857,8 +932,14 @@ async def start_ai_with_text(user_text: str):
             except Exception:
                 pass
         finally:
+            from audio_stream import __dict__ as _audio_stream_dict
+            if task is not None and _audio_stream_dict.get("current_ai_task") is task:
+                _audio_stream_dict["current_ai_task"] = None
+
             # 【修改】标记omni对话结束，恢复之前的导航模式
             global omni_conversation_active, omni_previous_nav_state
+            if session_generation != omni_session_generation:
+                return
             omni_conversation_active = False
 
             # 恢复之前的导航状态
@@ -909,7 +990,8 @@ def root():
 
 @app.get("/api/health", response_class=PlainTextResponse)
 def health():
-    return "OK"
+    ready = startup_ready and orchestrator is not None
+    return PlainTextResponse("OK" if ready else "STARTING", status_code=200 if ready else 503)
 
 
 @app.post("/api/debug_text")
@@ -919,7 +1001,8 @@ async def debug_text(request: Request):
     if not user_text:
         return {"success": False, "error": "Empty text"}
 
-    await start_ai_with_text_custom(user_text)
+    async with interrupt_lock:
+        await start_ai_with_text_custom(user_text)
     return {"success": True, "text": user_text}
 
 
@@ -944,6 +1027,8 @@ async def ws_ui(ws: WebSocket):
             await asyncio.sleep(60)
     except WebSocketDisconnect:
         pass
+    except asyncio.CancelledError:
+        pass
     finally:
         ui_clients.pop(id(ws), None)
 
@@ -951,11 +1036,18 @@ async def ws_ui(ws: WebSocket):
 # ---------- WebSocket：ESP32 音频入口（ASR 上行） ----------
 @app.websocket("/ws_audio")
 async def ws_audio(ws: WebSocket):
-    global esp32_audio_ws, esp32_audio_last_frame_at, asr_streaming_active
-    esp32_audio_ws = ws
-    esp32_audio_last_frame_at = 0.0
-    asr_streaming_active = False
-    await ws.accept()
+    global esp32_audio_ws, esp32_audio_last_frame_at, asr_streaming_active, active_asr_stop_fn
+    async with audio_ws_claim_lock:
+        if active_asr_stop_fn is not None:
+            await ws.close(code=1013)
+            return
+        if esp32_audio_ws is not None:
+            await ws.close(code=1013)
+            return
+        await ws.accept()
+        esp32_audio_ws = ws
+        esp32_audio_last_frame_at = 0.0
+        asr_streaming_active = False
     print("\n[AUDIO] client connected")
     await broadcast_asr_status(force=True)
     recognition = None
@@ -964,8 +1056,9 @@ async def ws_audio(ws: WebSocket):
     keepalive_task: Optional[asyncio.Task[Any]] = None
 
     async def stop_rec(send_notice: Optional[str] = None):
-        global asr_streaming_active
+        global asr_streaming_active, esp32_audio_last_frame_at
         nonlocal recognition, streaming, keepalive_task
+        stop_ok = True
         if keepalive_task and not keepalive_task.done():
             keepalive_task.cancel()
             try:
@@ -979,18 +1072,22 @@ async def ws_audio(ws: WebSocket):
             try:
                 recognition.stop()
             except Exception:
-                pass
-            recognition = None
-        await set_current_recognition(None)
-        streaming = False
-        asr_streaming_active = False
-        await ui_broadcast_partial("")
-        await broadcast_asr_status(force=True)
+                stop_ok = False
+            if stop_ok:
+                recognition = None
+                await set_current_recognition(None)
+                streaming = False
+                asr_streaming_active = False
+                esp32_audio_last_frame_at = 0.0
+                await ui_broadcast_partial("")
+                await broadcast_asr_status(force=True)
         if send_notice:
-            try:
-                await ws.send_text(send_notice)
-            except Exception:
-                pass
+            if stop_ok:
+                try:
+                    await ws.send_text(send_notice)
+                except Exception:
+                    pass
+        return stop_ok
 
     async def on_sdk_error(_msg: str):
         await stop_rec(send_notice="RESTART")
@@ -1031,7 +1128,14 @@ async def ws_audio(ws: WebSocket):
 
                 if cmd == "START":
                     print("[AUDIO] START received")
-                    await stop_rec()
+                    esp32_audio_last_frame_at = 0.0
+                    if not await stop_rec():
+                        print("[AUDIO] previous recognition stop failed")
+                    if not await stop_current_recognition():
+                        print("[AUDIO] global recognition stop failed; refusing restart")
+                        await broadcast_asr_status(force=True)
+                        await ws.send_text("ERR:ASR_STOP_FAILED")
+                        continue
                     loop = asyncio.get_running_loop()
 
                     def post(coro):
@@ -1060,6 +1164,7 @@ async def ws_audio(ws: WebSocket):
                     await set_current_recognition(recognition)
                     streaming = True
                     asr_streaming_active = True
+                    active_asr_stop_fn = stop_rec
                     last_ts = time.monotonic()
                     keepalive_task = asyncio.create_task(keepalive_loop())
                     await broadcast_asr_status(force=True)
@@ -1073,7 +1178,9 @@ async def ws_audio(ws: WebSocket):
                                 recognition.send_audio_frame(SILENCE_20MS)
                             except Exception:
                                 break
-                    await stop_rec(send_notice="OK:STOPPED")
+                    if not await stop_rec(send_notice="OK:STOPPED"):
+                        print("[AUDIO] recognition stop failed during STOP")
+                        await ws.send_text("ERR:STOP_FAILED")
 
                 elif raw.startswith("PROMPT:"):
                     # 设备端主动发起一轮：同样使用“先硬重置后播放”的强语义
@@ -1100,18 +1207,24 @@ async def ws_audio(ws: WebSocket):
     except Exception as e:
         print(f"\n[WS ERROR] {e}")
     finally:
-        await stop_rec()
+        stop_ok = await stop_rec()
+        if not stop_ok:
+            print("[WS] recognition stop failed during websocket cleanup")
         try:
             if WebSocketState is None or ws.client_state == WebSocketState.CONNECTED:
                 await ws.close(code=1000)
         except Exception:
             pass
-        if esp32_audio_ws is ws:
+        owns_ws = esp32_audio_ws is ws
+        if owns_ws:
             esp32_audio_ws = None
-        esp32_audio_last_frame_at = 0.0
-        asr_streaming_active = False
-        await ui_broadcast_partial("")
-        await broadcast_asr_status(force=True)
+            esp32_audio_last_frame_at = 0.0
+        if stop_ok and owns_ws and active_asr_stop_fn is stop_rec:
+            active_asr_stop_fn = None
+        if stop_ok and owns_ws:
+            asr_streaming_active = False
+            await ui_broadcast_partial("")
+            await broadcast_asr_status(force=True)
         print("[WS] connection closed")
 
 
@@ -1127,53 +1240,69 @@ async def ws_camera_esp(ws: WebSocket):
         cross_street_active, \
         navigation_active, \
         orchestrator
-    if esp32_camera_ws is not None:
-        await ws.close(code=1013)
-        return
-    esp32_camera_ws = ws
-    camera_connected_at = time.time()
-    camera_last_frame_at = 0.0
-    await ws.accept()
+    async with camera_ws_claim_lock:
+        if esp32_camera_ws is not None:
+            await ws.close(code=1013)
+            return
+        await ws.accept()
+        esp32_camera_ws = ws
+        camera_connected_at = time.time()
+        camera_last_frame_at = 0.0
     print("[CAMERA] ESP32 connected")
     await broadcast_camera_status(force=True)
-
-    # 【新增】初始化盲道导航器
-    if blind_path_navigator is None and yolo_seg_model is not None:
-        blind_path_navigator = BlindPathNavigator(yolo_seg_model, obstacle_detector)
-        print("[NAVIGATION] 盲道导航器已初始化")
-    else:
-        if blind_path_navigator is not None:
-            print("[NAVIGATION] 导航器已存在，无需重新初始化")
-        elif yolo_seg_model is None:
-            print("[NAVIGATION] 警告：YOLO模型未加载，无法初始化导航器")
-
-    # 【新增】初始化过马路导航器
-    if cross_street_navigator is None:
-        if yolo_seg_model:
-            cross_street_navigator = CrossStreetNavigator(
-                seg_model=yolo_seg_model,
-                coco_model=None,  # 不使用交通灯检测
-                obs_model=None,  # 暂时也不用障碍物检测，让它更快
-            )
-            print("[CROSS_STREET] 过马路导航器已初始化（简化版 - 仅斑马线检测）")
-        else:
-            print("[CROSS_STREET] 错误：缺少分割模型，无法初始化过马路导航器")
-
-            if not yolo_seg_model:
-                print("[CROSS_STREET] - 缺少分割模型 (yolo_seg_model)")
-            if not obstacle_detector:
-                print("[CROSS_STREET] - 缺少障碍物检测器 (obstacle_detector)")
-
-    if (
-        orchestrator is None
-        and blind_path_navigator is not None
-        and cross_street_navigator is not None
-    ):
-        orchestrator = NavigationMaster(blind_path_navigator, cross_street_navigator)
-        print("[NAV MASTER] 统领状态机已初始化（托管模式）")
     frame_counter = 0  # 添加帧计数器
 
     try:
+        # 【新增】初始化盲道导航器
+        next_blind_path_navigator = blind_path_navigator
+        next_cross_street_navigator = cross_street_navigator
+        next_orchestrator = orchestrator
+
+        if next_blind_path_navigator is None and yolo_seg_model is not None:
+            next_blind_path_navigator = BlindPathNavigator(yolo_seg_model, obstacle_detector)
+            print("[NAVIGATION] 盲道导航器已初始化")
+        else:
+            if next_blind_path_navigator is not None:
+                print("[NAVIGATION] 导航器已存在，无需重新初始化")
+            elif yolo_seg_model is None:
+                print("[NAVIGATION] 警告：YOLO模型未加载，无法初始化导航器")
+
+        # 【新增】初始化过马路导航器
+        if next_cross_street_navigator is None:
+            if yolo_seg_model:
+                next_cross_street_navigator = CrossStreetNavigator(
+                    seg_model=yolo_seg_model,
+                    coco_model=None,  # 不使用交通灯检测
+                    obs_model=None,  # 暂时也不用障碍物检测，让它更快
+                )
+                print("[CROSS_STREET] 过马路导航器已初始化（简化版 - 仅斑马线检测）")
+            else:
+                print("[CROSS_STREET] 错误：缺少分割模型，无法初始化过马路导航器")
+
+                if not yolo_seg_model:
+                    print("[CROSS_STREET] - 缺少分割模型 (yolo_seg_model)")
+                if not obstacle_detector:
+                    print("[CROSS_STREET] - 缺少障碍物检测器 (obstacle_detector)")
+
+        if (
+            next_orchestrator is None
+            and next_blind_path_navigator is not None
+            and next_cross_street_navigator is not None
+        ):
+            next_orchestrator = NavigationMaster(next_blind_path_navigator, next_cross_street_navigator)
+            print("[NAV MASTER] 统领状态机已初始化（托管模式）")
+
+        if (
+            next_blind_path_navigator is None
+            or next_cross_street_navigator is None
+            or next_orchestrator is None
+        ):
+            raise RuntimeError("camera navigation init incomplete")
+
+        blind_path_navigator = next_blind_path_navigator
+        cross_street_navigator = next_cross_street_navigator
+        orchestrator = next_orchestrator
+
         while True:
             msg = await ws.receive()
             if "bytes" in msg and msg["bytes"] is not None:
@@ -1188,7 +1317,8 @@ async def ws_camera_esp(ws: WebSocket):
 
                 # 【新增】录制原始帧
                 try:
-                    sync_recorder.record_frame(data)
+                    if sync_recorder.record_frame(data) is False:
+                        print("[RECORDER] 录制器帧写入失败，已停止当前录制会话")
                 except Exception as e:
                     if frame_counter % 100 == 0:  # 避免日志刷屏
                         print(f"[RECORDER] 录制帧失败: {e}")
@@ -1343,21 +1473,26 @@ async def ws_camera_esp(ws: WebSocket):
                 await ws.close(code=1000)
         except Exception:
             pass
-        esp32_camera_ws = None
-        camera_connected_at = 0.0
-        camera_last_frame_at = 0.0
-        print("[CAMERA] ESP32 disconnected")
-        await broadcast_camera_status(force=True)
+        owns_ws = esp32_camera_ws is ws
+        if owns_ws:
+            stop_yolomedia()
+            esp32_camera_ws = None
+            camera_connected_at = 0.0
+            camera_last_frame_at = 0.0
+            bridge_io.clear_frames()
+            last_frames.clear()
+            print("[CAMERA] ESP32 disconnected")
+            await broadcast_camera_status(force=True)
 
-        if orchestrator:
-            preserved_state = orchestrator.get_state()
-            orchestrator.reset_for_camera_reconnect()
-            print(f"[NAV MASTER] 相机重连重置完成，保留状态: {preserved_state}")
-        else:
-            if blind_path_navigator:
-                blind_path_navigator.reset()
-            if cross_street_navigator:
-                cross_street_navigator.reset()
+            if orchestrator:
+                preserved_state = orchestrator.get_state()
+                orchestrator.reset_for_camera_reconnect()
+                print(f"[NAV MASTER] 相机重连重置完成，保留状态: {preserved_state}")
+            else:
+                if blind_path_navigator:
+                    blind_path_navigator.reset()
+                if cross_street_navigator:
+                    cross_street_navigator.reset()
 
 
 # ---------- WebSocket：浏览器订阅相机帧 ----------
@@ -1375,6 +1510,8 @@ async def ws_viewer(ws: WebSocket):
             await asyncio.sleep(60)
     except WebSocketDisconnect:
         print("[VIEWER] Browser disconnected", flush=True)
+    except asyncio.CancelledError:
+        pass
     finally:
         try:
             camera_viewers.remove(ws)
@@ -1393,6 +1530,8 @@ async def ws_imu(ws: WebSocket):
         while True:
             await asyncio.sleep(60)
     except WebSocketDisconnect:
+        pass
+    except asyncio.CancelledError:
         pass
     finally:
         imu_ws_clients.discard(ws)
@@ -1436,6 +1575,19 @@ last_ts_imu = 0.0
 last_wall = 0.0
 imu_store: List[Dict[str, Any]] = []
 
+def reset_imu_runtime_state():
+    global gLP, gOff, yaw, Rf, Pf, Yf, ref, holdStart, isStill, last_ts_imu, last_wall, imu_store
+    gLP = {"x": 0.0, "y": 0.0, "z": 0.0}
+    gOff = {"x": 0.0, "y": 0.0, "z": 0.0}
+    yaw = 0.0
+    Rf = Pf = Yf = 0.0
+    ref = {"roll": 0.0, "pitch": 0.0, "yaw": 0.0}
+    holdStart = 0.0
+    isStill = False
+    last_ts_imu = 0.0
+    last_wall = 0.0
+    imu_store = []
+
 
 def _wrap180(a: float) -> float:
     a = a % 360.0
@@ -1459,12 +1611,21 @@ def process_imu_and_maybe_store(d: Dict[str, Any]):
         dt = (t_ms - last_ts_imu) / 1000.0
     last_ts_imu = t_ms
 
-    ax = float(((d.get("accel") or {}).get("x", 0.0)))
-    ay = float(((d.get("accel") or {}).get("y", 0.0)))
-    az = float(((d.get("accel") or {}).get("z", 0.0)))
-    wx = float(((d.get("gyro") or {}).get("x", 0.0)))
-    wy = float(((d.get("gyro") or {}).get("y", 0.0)))
-    wz = float(((d.get("gyro") or {}).get("z", 0.0)))
+    # 原始IMU坐标：x朝前，y朝上，z朝右
+    # 统一业务坐标：x朝前，y朝左，z朝上
+    ax_raw = float(((d.get("accel") or {}).get("x", 0.0)))
+    ay_raw = float(((d.get("accel") or {}).get("y", 0.0)))
+    az_raw = float(((d.get("accel") or {}).get("z", 0.0)))
+    wx_raw = float(((d.get("gyro") or {}).get("x", 0.0)))
+    wy_raw = float(((d.get("gyro") or {}).get("y", 0.0)))
+    wz_raw = float(((d.get("gyro") or {}).get("z", 0.0)))
+
+    ax = ax_raw
+    ay = -az_raw
+    az = ay_raw
+    wx = wx_raw
+    wy = -wz_raw
+    wz = wy_raw
 
     gLP["x"] = GRAV_BETA * gLP["x"] + (1.0 - GRAV_BETA) * ax
     gLP["y"] = GRAV_BETA * gLP["y"] + (1.0 - GRAV_BETA) * ay
@@ -1472,8 +1633,9 @@ def process_imu_and_maybe_store(d: Dict[str, Any]):
     gmag = hypot(gLP["x"], gLP["y"], gLP["z"]) or 1.0
     gHat = {"x": gLP["x"] / gmag, "y": gLP["y"] / gmag, "z": gLP["z"] / gmag}
 
-    roll = atan2(az, ay) * 180.0 / pi
-    pitch = atan2(-ax, ay) * 180.0 / pi
+    # 机体坐标约定：x 朝前，y 朝左，z 朝上
+    roll = atan2(ay, az) * 180.0 / pi
+    pitch = atan2(-ax, hypot(ay, az)) * 180.0 / pi
 
     aNorm = hypot(ax, ay, az)
     wNorm = hypot(wx, wy, wz)
@@ -1499,7 +1661,7 @@ def process_imu_and_maybe_store(d: Dict[str, Any]):
             + (wz - gOff["z"]) * gHat["z"]
         )
     else:
-        yawdot = wy - gOff["y"]
+        yawdot = wz - gOff["z"]
 
     if abs(yawdot) < YAW_DB:
         yawdot = 0.0
@@ -1550,18 +1712,21 @@ class UDPProto(asyncio.DatagramProtocol):
 
     def datagram_received(self, data, addr):
         try:
+            if not imu_accepting_packets:
+                return
             s = data.decode("utf-8", errors="ignore").strip()
             d = json.loads(s)
             if "ts" not in d and "timestamp_ms" in d:
                 d["ts"] = d.pop("timestamp_ms")
             process_imu_and_maybe_store(d)
-            asyncio.create_task(imu_broadcast(json.dumps(d)))
+            task = asyncio.create_task(imu_broadcast(json.dumps(d)))
+            imu_broadcast_tasks.add(task)
+            task.add_done_callback(lambda done: imu_broadcast_tasks.discard(done))
         except Exception:
             pass
 
 
 # === 新增：注册给 bridge_io 的发送回调（把 JPEG 广播给 /ws/viewer） ===
-@app.on_event("startup")
 async def on_startup_register_bridge_sender():
     # 保存主线程的事件循环
     main_loop = asyncio.get_event_loop()
@@ -1605,23 +1770,102 @@ async def on_startup_register_bridge_sender():
     bridge_io.set_sender(_sender)
 
 
-@app.on_event("startup")
-async def on_startup_init_audio():
-    """启动时初始化音频系统"""
-
-    # 在后台线程中初始化，避免阻塞启动
-    def _init():
-        try:
-            initialize_audio_system()
-        except Exception as e:
-            print(f"[AUDIO] 初始化失败: {e}")
-
-    threading.Thread(target=_init, daemon=True).start()
-
-
-@app.on_event("startup")
 async def on_startup():
-    global camera_status_task
+    global camera_status_task, imu_accepting_packets, imu_transport, esp32_audio_ws, esp32_camera_ws, active_asr_stop_fn, asr_streaming_active, camera_connected_at, camera_last_frame_at, esp32_audio_last_frame_at, blind_path_navigator, cross_street_navigator, orchestrator, yolo_seg_model, obstacle_detector, startup_ready
+
+    async def _close_stale_ws(ws: Optional[WebSocket], code: int = 1001) -> bool:
+        if ws is None:
+            return True
+        try:
+            if ws.client_state == WebSocketState.CONNECTED:
+                await ws.close(code=code)
+            return True
+        except Exception:
+            return False
+
+    startup_state_ok = True
+    startup_ready = False
+    esp32_audio_last_frame_at = 0.0
+    reset_imu_runtime_state()
+    if not reset_trafficlight_runtime_state():
+        startup_state_ok = False
+
+    pending_imu_tasks = list(imu_broadcast_tasks)
+    if pending_imu_tasks:
+        done, pending = await asyncio.wait(pending_imu_tasks, timeout=1.0)
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        imu_broadcast_tasks.clear()
+
+    if active_asr_stop_fn is not None:
+        if not await active_asr_stop_fn():
+            startup_state_ok = False
+        else:
+            active_asr_stop_fn = None
+            asr_streaming_active = False
+
+    if esp32_audio_ws is not None:
+        if not await _close_stale_ws(esp32_audio_ws):
+            startup_state_ok = False
+        else:
+            esp32_audio_ws = None
+    esp32_audio_last_frame_at = 0.0
+
+    if esp32_camera_ws is not None:
+        if not await _close_stale_ws(esp32_camera_ws):
+            startup_state_ok = False
+        else:
+            esp32_camera_ws = None
+            camera_connected_at = 0.0
+            camera_last_frame_at = 0.0
+
+    for ws in list(ui_clients.values()):
+        if not await _close_stale_ws(ws):
+            startup_state_ok = False
+    if startup_state_ok:
+        ui_clients.clear()
+
+    for ws in list(camera_viewers):
+        if not await _close_stale_ws(ws):
+            startup_state_ok = False
+    if startup_state_ok:
+        camera_viewers.clear()
+
+    for ws in list(imu_ws_clients):
+        if not await _close_stale_ws(ws):
+            startup_state_ok = False
+    if startup_state_ok:
+        imu_ws_clients.clear()
+
+    if sync_recorder.stop_recording() is False:
+        startup_state_ok = False
+
+    await hard_reset_audio("startup_preflight")
+    from audio_stream import current_ai_task as _startup_ai_task, stream_clients as _startup_stream_clients
+    if _startup_ai_task is not None or _startup_stream_clients:
+        startup_state_ok = False
+
+    if not cleanup_producer_threads():
+        startup_state_ok = False
+
+    if not sanitize_audio_system_state():
+        startup_state_ok = False
+
+    if not stop_yolomedia():
+        startup_state_ok = False
+
+    bridge_io.clear_frames()
+    last_frames.clear()
+    bump_omni_generation()
+    reset_ui_session_state()
+    clear_navigation_session_state()
+    yolo_seg_model = None
+    obstacle_detector = None
+
+    if not startup_state_ok:
+        raise RuntimeError("上一次关闭未完全清理，拒绝在同进程内继续启动")
 
     async def camera_status_watchdog():
         while True:
@@ -1665,18 +1909,211 @@ async def on_startup():
                 print(f"[CAMERA STATUS] watchdog error: {e}", flush=True)
                 await asyncio.sleep(1.0)
 
-    camera_status_task = asyncio.create_task(camera_status_watchdog())
-    loop = asyncio.get_running_loop()
-    await loop.create_datagram_endpoint(
-        lambda: UDPProto(), local_addr=(UDP_IP, UDP_PORT)
-    )
+    try:
+        initialize_audio_system()
+
+        print("[NAVIGATION] 开始加载导航模型...")
+        load_navigation_models()
+        if yolo_seg_model is None or obstacle_detector is None:
+            raise RuntimeError("导航模型未完成加载")
+        print(f"[NAVIGATION] 模型加载完成 - yolo_seg_model: {yolo_seg_model is not None}")
+
+        print("[RECORDER] 启动同步录制系统...")
+        if not sync_recorder.start_recording():
+            raise RuntimeError("同步录制系统启动失败")
+        print("[RECORDER] 录制系统已启动，将自动保存视频和音频")
+
+        # 【新增】预加载红绿灯检测模型（避免进入WAIT_TRAFFIC_LIGHT状态时卡顿）
+        try:
+            import trafficlight_detection
+
+            print("[TRAFFIC_LIGHT] 开始预加载红绿灯检测模型...")
+            if trafficlight_detection.init_model():
+                print("[TRAFFIC_LIGHT] 红绿灯检测模型预加载成功")
+                try:
+                    test_img = np.zeros((640, 640, 3), dtype=np.uint8)
+                    _ = trafficlight_detection.process_single_frame(test_img)
+                    print("[TRAFFIC_LIGHT] 模型预热完成")
+                except Exception as e:
+                    raise RuntimeError(f"红绿灯模型预热失败: {e}")
+            else:
+                raise RuntimeError("红绿灯检测模型预加载失败")
+        except Exception as e:
+            raise RuntimeError(f"红绿灯模型预加载出错: {e}")
+
+        camera_status_task = asyncio.create_task(camera_status_watchdog())
+        loop = asyncio.get_running_loop()
+        imu_accepting_packets = True
+        transport, _ = await loop.create_datagram_endpoint(
+            lambda: UDPProto(), local_addr=(UDP_IP, UDP_PORT)
+        )
+        imu_transport = transport
+        startup_ready = True
+    except Exception:
+        print("[STARTUP] 启动失败，正在回收已初始化资源...", flush=True)
+        imu_accepting_packets = False
+
+        if imu_transport is not None:
+            try:
+                imu_transport.close()
+            except Exception:
+                pass
+            imu_transport = None
+
+        if camera_status_task and not camera_status_task.done():
+            camera_status_task.cancel()
+            try:
+                await camera_status_task
+            except asyncio.CancelledError:
+                pass
+        camera_status_task = None
+
+        bridge_io.set_sender(None)
+        bridge_io.clear_frames()
+        last_frames.clear()
+        reset_imu_runtime_state()
+        if not reset_trafficlight_runtime_state():
+            print("[STARTUP] 启动失败时红绿灯运行态未完全重置", flush=True)
+        reset_ui_session_state()
+        clear_navigation_session_state()
+        yolo_seg_model = None
+        obstacle_detector = None
+        await hard_reset_audio("startup_failed")
+        audio_shutdown_ok = shutdown_audio_system()
+        recorder_shutdown_ok = True
+        if audio_shutdown_ok is False:
+            print("[STARTUP] 启动失败时音频系统未完全关闭", flush=True)
+
+        try:
+            recorder_shutdown_ok = sync_recorder.stop_recording()
+            if recorder_shutdown_ok is False:
+                print("[STARTUP] 启动失败时录制器未完全关闭", flush=True)
+        except Exception as e:
+            print(f"[STARTUP] 启动失败时关闭录制器失败: {e}", flush=True)
+
+        if audio_shutdown_ok is False or recorder_shutdown_ok is False:
+            print("[STARTUP] 启动失败清理未完成，开始重试一次...", flush=True)
+            await hard_reset_audio("startup_failed_retry")
+            if shutdown_audio_system() is False:
+                print("[STARTUP] 启动失败重试后音频系统仍未完全关闭", flush=True)
+            try:
+                if sync_recorder.stop_recording() is False:
+                    print("[STARTUP] 启动失败重试后录制器仍未完全关闭", flush=True)
+            except Exception as e:
+                print(f"[STARTUP] 启动失败重试关闭录制器失败: {e}", flush=True)
+
+        raise
 
 
-@app.on_event("shutdown")
 async def on_shutdown():
     """应用关闭时的清理工作"""
-    global camera_status_task
+    global camera_status_task, imu_accepting_packets, imu_transport, esp32_audio_ws, esp32_camera_ws, active_asr_stop_fn, asr_streaming_active, camera_connected_at, camera_last_frame_at, esp32_audio_last_frame_at, blind_path_navigator, cross_street_navigator, orchestrator, yolo_seg_model, obstacle_detector, startup_ready
     print("[SHUTDOWN] 开始清理资源...")
+    shutdown_ok = True
+    startup_ready = False
+
+    async def _close_ws_client(ws: Optional[WebSocket], code: int = 1001) -> bool:
+        if ws is None:
+            return True
+        try:
+            if ws.client_state == WebSocketState.CONNECTED:
+                await ws.close(code=code)
+            return True
+        except Exception:
+            return False
+
+    async def _retry_failed_cleanup_once() -> bool:
+        global active_asr_stop_fn, asr_streaming_active, esp32_audio_last_frame_at, esp32_audio_ws, esp32_camera_ws, camera_connected_at, camera_last_frame_at
+        retry_ok = True
+
+        if not reset_trafficlight_runtime_state():
+            retry_ok = False
+
+        recognition_retry_ok = True
+        if active_asr_stop_fn is not None:
+            recognition_retry_ok = await active_asr_stop_fn()
+        else:
+            recognition_retry_ok = await stop_current_recognition()
+            if recognition_retry_ok:
+                active_asr_stop_fn = None
+                asr_streaming_active = False
+                esp32_audio_last_frame_at = 0.0
+        if not recognition_retry_ok:
+            retry_ok = False
+
+        if esp32_audio_ws is not None:
+            if not await _close_ws_client(esp32_audio_ws):
+                retry_ok = False
+            else:
+                esp32_audio_ws = None
+                if recognition_retry_ok:
+                    active_asr_stop_fn = None
+                    asr_streaming_active = False
+                esp32_audio_last_frame_at = 0.0
+
+        if esp32_camera_ws is not None:
+            if not await _close_ws_client(esp32_camera_ws):
+                retry_ok = False
+            else:
+                esp32_camera_ws = None
+                camera_connected_at = 0.0
+                camera_last_frame_at = 0.0
+
+        for ws in list(ui_clients.values()):
+            if not await _close_ws_client(ws):
+                retry_ok = False
+            else:
+                ui_clients.pop(id(ws), None)
+
+        for ws in list(camera_viewers):
+            if not await _close_ws_client(ws):
+                retry_ok = False
+            else:
+                camera_viewers.discard(ws)
+
+        for ws in list(imu_ws_clients):
+            if not await _close_ws_client(ws):
+                retry_ok = False
+            else:
+                imu_ws_clients.discard(ws)
+
+        if not stop_yolomedia():
+            retry_ok = False
+
+        await hard_reset_audio("shutdown_retry")
+        if not cleanup_producer_threads():
+            retry_ok = False
+        if shutdown_audio_system() is False:
+            retry_ok = False
+
+        try:
+            if sync_recorder.stop_recording() is False:
+                retry_ok = False
+        except Exception:
+            retry_ok = False
+
+        return retry_ok
+
+    imu_accepting_packets = False
+    reset_imu_runtime_state()
+    if not reset_trafficlight_runtime_state():
+        shutdown_ok = False
+
+    if imu_transport is not None:
+        try:
+            imu_transport.close()
+        except Exception as e:
+            print(f"[SHUTDOWN] 关闭 IMU UDP transport 失败: {e}")
+        imu_transport = None
+
+    pending_imu_tasks = list(imu_broadcast_tasks)
+    if pending_imu_tasks:
+        done, pending = await asyncio.wait(pending_imu_tasks, timeout=1.0)
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        imu_broadcast_tasks.clear()
 
     if camera_status_task and not camera_status_task.done():
         camera_status_task.cancel()
@@ -1686,13 +2123,99 @@ async def on_shutdown():
             pass
     camera_status_task = None
 
+    recognition_stopped = True
+    if active_asr_stop_fn is not None:
+        recognition_stopped = await active_asr_stop_fn()
+    else:
+        recognition_stopped = await stop_current_recognition()
+        if recognition_stopped:
+            active_asr_stop_fn = None
+            asr_streaming_active = False
+            esp32_audio_last_frame_at = 0.0
+    if not recognition_stopped:
+        print("[SHUTDOWN] 停止识别会话失败")
+        shutdown_ok = False
+    elif esp32_audio_ws is None:
+        active_asr_stop_fn = None
+        asr_streaming_active = False
+
+    if esp32_audio_ws is not None:
+        if not await _close_ws_client(esp32_audio_ws):
+            print("[SHUTDOWN] 关闭音频 websocket 失败")
+            shutdown_ok = False
+        else:
+            esp32_audio_ws = None
+            if recognition_stopped:
+                active_asr_stop_fn = None
+                asr_streaming_active = False
+    esp32_audio_last_frame_at = 0.0
+
+    if esp32_camera_ws is not None:
+        if not await _close_ws_client(esp32_camera_ws):
+            print("[SHUTDOWN] 关闭相机 websocket 失败")
+            shutdown_ok = False
+        else:
+            esp32_camera_ws = None
+            camera_connected_at = 0.0
+            camera_last_frame_at = 0.0
+
+    ui_ws_clients = list(ui_clients.values())
+    for ws in ui_ws_clients:
+        if not await _close_ws_client(ws):
+            shutdown_ok = False
+        else:
+            ui_clients.pop(id(ws), None)
+
+    viewer_ws_clients = list(camera_viewers)
+    for ws in viewer_ws_clients:
+        if not await _close_ws_client(ws):
+            shutdown_ok = False
+        else:
+            camera_viewers.discard(ws)
+
+    imu_clients = list(imu_ws_clients)
+    for ws in imu_clients:
+        if not await _close_ws_client(ws):
+            shutdown_ok = False
+        else:
+            imu_ws_clients.discard(ws)
+
     # 停止YOLO媒体处理
-    stop_yolomedia()
+    if not stop_yolomedia():
+        shutdown_ok = False
+
+    bridge_io.set_sender(None)
+    bridge_io.clear_frames()
+    last_frames.clear()
+    bump_omni_generation()
+    reset_ui_session_state()
+    clear_navigation_session_state()
+    yolo_seg_model = None
+    obstacle_detector = None
 
     # 停止音频和AI任务
     await hard_reset_audio("shutdown")
+    if not cleanup_producer_threads():
+        shutdown_ok = False
 
-    print("[SHUTDOWN] 资源清理完成")
+    if shutdown_audio_system() is False:
+        shutdown_ok = False
+
+    try:
+        if sync_recorder.stop_recording() is False:
+            shutdown_ok = False
+    except Exception as e:
+        print(f"[SHUTDOWN] 关闭录制器失败: {e}")
+        shutdown_ok = False
+
+    if not shutdown_ok:
+        print("[SHUTDOWN] 首次清理未完成，开始重试一次...")
+        shutdown_ok = await _retry_failed_cleanup_once()
+
+    if shutdown_ok:
+        print("[SHUTDOWN] 资源清理完成")
+    else:
+        print("[SHUTDOWN] 资源清理未完全完成")
 
 
 # app_main.py —— 在文件里已有的 @app.on_event("startup") 之后，再加一个新的 startup 钩子
