@@ -8,6 +8,7 @@ import asyncio
 import threading
 import queue
 import time
+import ctypes
 from audio_stream import broadcast_pcm16_realtime
 from audio_compressor import compressed_audio_cache, AudioCompressor
 
@@ -72,8 +73,12 @@ _audio_queue = queue.PriorityQueue(maxsize=10)
 _audio_priority = 0  # 递增的优先级计数器
 _worker_thread = None
 _worker_loop = None
+_audio_shutdown_token = object()
 _is_playing = False  # 标记是否正在播放音频
 _playing_lock = threading.Lock()  # 播放锁
+_queue_lock = threading.Lock()
+_init_lock = threading.Lock()
+_playback_stop_event = threading.Event()
 _initialized = False
 _last_play_ts = 0.0  # 记录上次播放结束时间，用于决定预热静音长度
 
@@ -186,7 +191,7 @@ def preload_all_audio():
 
 def _audio_worker():
     """音频播放工作线程"""
-    global _worker_loop
+    global _worker_loop, _worker_thread
 
     # 尝试设置线程优先级（Windows特定）
     try:
@@ -213,24 +218,54 @@ def _audio_worker():
                 priority_data = await asyncio.get_event_loop().run_in_executor(
                     None, _audio_queue.get, True
                 )
-                if priority_data is None:
-                    break
                 # 解包优先级和实际音频数据
                 if isinstance(priority_data, tuple) and len(priority_data) == 2:
                     _, audio_data = priority_data
                 else:
                     audio_data = priority_data
+                if audio_data is _audio_shutdown_token:
+                    break
+                if not isinstance(audio_data, (bytes, bytearray)):
+                    continue
+                if isinstance(audio_data, bytearray):
+                    audio_data = bytes(audio_data)
                 await _broadcast_audio_optimized(audio_data)
             except Exception as e:
                 print(f"[AUDIO] 工作线程错误: {e}")
 
-    _worker_loop.run_until_complete(process_queue())
+    try:
+        _worker_loop.run_until_complete(process_queue())
+    finally:
+        _worker_loop.close()
+        _worker_loop = None
+        _worker_thread = None
+
+
+def _force_stop_audio_worker(worker: threading.Thread) -> bool:
+    ident = worker.ident
+    if ident is None:
+        return False
+    try:
+        result = ctypes.pythonapi.PyThreadState_SetAsyncExc(
+            ctypes.c_ulong(ident), ctypes.py_object(SystemExit)
+        )
+        if result == 0:
+            return False
+        if result > 1:
+            ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_ulong(ident), None)
+            return False
+        worker.join(timeout=1.0)
+        return not worker.is_alive()
+    except Exception as e:
+        print(f"[AUDIO] 强制停止音频线程失败: {e}")
+        return False
 
 
 async def _broadcast_audio_optimized(pcm_data: bytes):
     """优化的音频广播：单次调用由底层按20ms节拍发送，移除重复节拍和Python层sleep"""
     global _last_play_ts, _is_playing
     try:
+        _playback_stop_event.clear()
         # 设置播放标志
         with _playing_lock:
             _is_playing = True
@@ -250,7 +285,7 @@ async def _broadcast_audio_optimized(pcm_data: bytes):
         # 注意：录制在 broadcast_pcm16_realtime 中统一完成，避免重复
 
         # 单次调用交给底层 pacing（20ms节拍在 broadcast_pcm16_realtime 内部实现）
-        await broadcast_pcm16_realtime(full_audio)
+        await broadcast_pcm16_realtime(full_audio, stop_event=_playback_stop_event)
 
         _last_play_ts = time.monotonic()
     except Exception as e:
@@ -259,37 +294,109 @@ async def _broadcast_audio_optimized(pcm_data: bytes):
         # 清除播放标志
         with _playing_lock:
             _is_playing = False
+        _playback_stop_event.clear()
 
 
 def initialize_audio_system():
     """初始化音频系统"""
     global _initialized, _worker_thread, _last_play_ts
 
-    if _initialized:
-        return
+    with _init_lock:
+        if _initialized and _worker_thread is not None and _worker_thread.is_alive():
+            return
 
-    # 先合并 voice 映射，再预加载
-    _merge_voice_map()
-    if not AUDIO_MAP:
-        print("[AUDIO] 警告: 语音映射为空，预录语音将不可用")
-    preload_all_audio()
+        if _worker_thread is not None and not _worker_thread.is_alive():
+            _worker_thread = None
+            _initialized = False
 
-    _worker_thread = threading.Thread(target=_audio_worker, daemon=True)
-    _worker_thread.start()
-    _initialized = True
-    _last_play_ts = 0.0
+        # 先合并 voice 映射，再预加载
+        _merge_voice_map()
+        if not AUDIO_MAP:
+            print("[AUDIO] 警告: 语音映射为空，预录语音将不可用")
+        preload_all_audio()
 
-    # 显示压缩统计
-    if os.getenv("AIGLASS_COMPRESS_AUDIO", "1") == "1":
-        stats = compressed_audio_cache.get_compression_stats()
-        print(f"[AUDIO] 音频压缩统计:")
-        print(f"  - 文件数: {stats['files_cached']}")
-        print(f"  - 原始大小: {stats['total_original_size'] / 1024:.1f} KB")
-        print(f"  - 压缩后: {stats['total_compressed_size'] / 1024:.1f} KB")
-        print(f"  - 压缩率: {stats['compression_ratio']:.1%}")
-        print(f"  - 节省: {stats['bytes_saved'] / 1024:.1f} KB")
+        _worker_thread = threading.Thread(target=_audio_worker, daemon=True)
+        _worker_thread.start()
+        _initialized = True
+        _last_play_ts = 0.0
 
-    print("[AUDIO] 音频系统初始化完成（预加载+工作线程）")
+        # 显示压缩统计
+        if os.getenv("AIGLASS_COMPRESS_AUDIO", "1") == "1":
+            stats = compressed_audio_cache.get_compression_stats()
+            print(f"[AUDIO] 音频压缩统计:")
+            print(f"  - 文件数: {stats['files_cached']}")
+            print(f"  - 原始大小: {stats['total_original_size'] / 1024:.1f} KB")
+            print(f"  - 压缩后: {stats['total_compressed_size'] / 1024:.1f} KB")
+            print(f"  - 压缩率: {stats['compression_ratio']:.1%}")
+            print(f"  - 节省: {stats['bytes_saved'] / 1024:.1f} KB")
+
+        print("[AUDIO] 音频系统初始化完成（预加载+工作线程）")
+
+
+def shutdown_audio_system():
+    """关闭音频系统工作线程。"""
+    global _initialized, _audio_priority, _audio_queue, _worker_thread
+
+    with _init_lock:
+        if not _initialized:
+            return True
+
+        with _queue_lock:
+            _playback_stop_event.set()
+            while True:
+                try:
+                    _audio_queue.get_nowait()
+                except queue.Empty:
+                    break
+            _audio_queue.put_nowait((0, _audio_shutdown_token))
+
+        worker = _worker_thread
+        if worker and worker.is_alive():
+            worker.join(timeout=2.0)
+
+        if worker and worker.is_alive():
+            print("[AUDIO] 音频工作线程未在超时内退出")
+            if _force_stop_audio_worker(worker):
+                print("[AUDIO] 音频工作线程已强制停止")
+            else:
+                return False
+
+        _audio_queue = queue.PriorityQueue(maxsize=10)
+        _audio_priority = 0
+        _worker_thread = None
+        _initialized = False
+        return True
+
+
+def sanitize_audio_system_state():
+    """清理跨生命周期残留的音频状态。"""
+    global _worker_thread, _initialized, _audio_priority, _audio_queue
+    with _init_lock:
+        sanitized_ok = True
+        worker = _worker_thread
+        if worker is not None and worker.is_alive():
+            with _queue_lock:
+                _playback_stop_event.set()
+                while True:
+                    try:
+                        _audio_queue.get_nowait()
+                    except queue.Empty:
+                        break
+                _audio_queue.put_nowait((0, _audio_shutdown_token))
+            worker.join(timeout=1.0)
+            if worker.is_alive():
+                if not _force_stop_audio_worker(worker):
+                    sanitized_ok = False
+
+        if worker is not None and worker.is_alive():
+            return False
+
+        _worker_thread = None
+        _initialized = False
+        _audio_priority = 0
+        _audio_queue = queue.PriorityQueue(maxsize=10)
+        _playback_stop_event.clear()
+        return sanitized_ok
 
 
 def play_audio_threadsafe(audio_key):
@@ -323,19 +430,27 @@ def play_audio_threadsafe(audio_key):
     with _playing_lock:
         currently_playing = _is_playing
 
-    # 实时策略：只允许1个积压，超过立即清空
-    if queue_size > 0 and not currently_playing:
-        # 未播放时立即清空，播放最新语音
-        print(f"[AUDIO] 清空队列（当前{queue_size}个），播放最新语音")
-        _audio_queue = queue.PriorityQueue(maxsize=10)
-    elif queue_size > 1 and currently_playing:
-        # 正在播放时，如果积压>1个则清空（保持实时性）
-        print(f"[AUDIO] 队列积压({queue_size}个)，清空以保持实时")
-        _audio_queue = queue.PriorityQueue(maxsize=10)
     try:
-        # 使用优先级队列，确保音频按顺序播放
-        _audio_priority += 1
-        _audio_queue.put_nowait((_audio_priority, pcm_data))
+        with _queue_lock:
+            # 实时策略：只允许1个积压，超过立即清空
+            if queue_size > 0 and not currently_playing:
+                print(f"[AUDIO] 清空队列（当前{queue_size}个），播放最新语音")
+                while True:
+                    try:
+                        _audio_queue.get_nowait()
+                    except queue.Empty:
+                        break
+            elif queue_size > 1 and currently_playing:
+                print(f"[AUDIO] 队列积压({queue_size}个)，清空以保持实时")
+                while True:
+                    try:
+                        _audio_queue.get_nowait()
+                    except queue.Empty:
+                        break
+
+            # 使用优先级队列，确保音频按顺序播放
+            _audio_priority += 1
+            _audio_queue.put_nowait((_audio_priority, pcm_data))
         if queue_size >= 1:
             print(f"[AUDIO] 播放队列当前大小: {queue_size + 1}")
     except queue.Full:

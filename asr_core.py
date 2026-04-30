@@ -80,12 +80,17 @@ async def stop_current_recognition():
     global _current_recognition
     async with _rec_lock:
         r = _current_recognition
-        _current_recognition = None
+    if r is None:
+        return True
     if r:
         try:
             r.stop()  # DashScope SDK 的实时识别停止
+            async with _rec_lock:
+                if _current_recognition is r:
+                    _current_recognition = None
+            return True
         except Exception:
-            pass
+            return False
 
 # ============ ASR 回调 ============
 class ASRCallback:
@@ -164,7 +169,13 @@ class ASRCallback:
             async def _hot_reset():
                 async with self._interrupt_lock:
                     print(f"[ASR HOTWORD] '{text}' -> FULL RESET, skip LLM", flush=True)
-                    await self._full_reset("Hotword interrupt")
+                    reset_ok = await self._full_reset("Hotword interrupt")
+                    if not reset_ok:
+                        print("[ASR HOTWORD] FULL RESET incomplete", flush=True)
+                        try:
+                            await self._ui_final("[系统] 中断后的系统复位未完全完成，请稍后再试")
+                        except Exception:
+                            pass
             try:
                 self._post(_hot_reset())
             except Exception:

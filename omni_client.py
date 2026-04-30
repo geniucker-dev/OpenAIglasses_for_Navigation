@@ -1,6 +1,6 @@
 # omni_client.py
 # -*- coding: utf-8 -*-
-import os, base64
+import os, base64, asyncio, threading
 from typing import AsyncGenerator, Dict, Any, List, Optional, Tuple
 
 from openai import OpenAI
@@ -17,6 +17,19 @@ oai_client = OpenAI(
     api_key=API_KEY,
     base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
 )
+
+_producer_threads: set[threading.Thread] = set()
+_producer_threads_lock = threading.Lock()
+
+def cleanup_producer_threads() -> bool:
+    with _producer_threads_lock:
+        alive = set()
+        for t in _producer_threads:
+            if t.is_alive():
+                alive.add(t)
+        _producer_threads.clear()
+        _producer_threads.update(alive)
+        return len(_producer_threads) == 0
 
 class OmniStreamPiece:
     """对外的统一增量数据：text/audio 二选一或同时。"""
@@ -35,37 +48,66 @@ async def stream_chat(
     - 以 stream=True 返回
     - 增量产出：OmniStreamPiece(text_delta=?, audio_b64=?)
     """
-    completion = oai_client.chat.completions.create(
-        model=QWEN_MODEL,
-        messages=[{"role": "user", "content": content_list}],
-        modalities=["text", "audio"],
-        audio={"voice": voice, "format": audio_format},
-        stream=True,
-        stream_options={"include_usage": True},
-    )
+    loop = asyncio.get_running_loop()
+    q: asyncio.Queue[OmniStreamPiece | BaseException | None] = asyncio.Queue()
+    stop_event = threading.Event()
 
-    # 注意：OpenAI SDK 的流是同步迭代器；在 async 场景下逐项 yield
-    for chunk in completion:
-        text_delta: Optional[str] = None
-        audio_b64: Optional[str] = None
+    def _producer():
+        try:
+            completion = oai_client.chat.completions.create(
+                model=QWEN_MODEL,
+                messages=[{"role": "user", "content": content_list}],
+                modalities=["text", "audio"],
+                audio={"voice": voice, "format": audio_format},
+                stream=True,
+                stream_options={"include_usage": True},
+            )
 
-        if getattr(chunk, "choices", None):
-            c0 = chunk.choices[0]
-            delta = getattr(c0, "delta", None)
-            # 文本增量
-            if delta and getattr(delta, "content", None):
-                piece = delta.content
-                if piece:
-                    text_delta = piece
-            # 音频分片
-            if delta and getattr(delta, "audio", None):
-                aud = delta.audio
-                audio_b64 = aud.get("data") if isinstance(aud, dict) else getattr(aud, "data", None)
-            if audio_b64 is None:
-                msg = getattr(c0, "message", None)
-                if msg and getattr(msg, "audio", None):
-                    ma = msg.audio
-                    audio_b64 = ma.get("data") if isinstance(ma, dict) else getattr(ma, "data", None)
+            for chunk in completion:
+                if stop_event.is_set():
+                    break
+                text_delta: Optional[str] = None
+                audio_b64: Optional[str] = None
 
-        if (text_delta is not None) or (audio_b64 is not None):
-            yield OmniStreamPiece(text_delta=text_delta, audio_b64=audio_b64)
+                if getattr(chunk, "choices", None):
+                    c0 = chunk.choices[0]
+                    delta = getattr(c0, "delta", None)
+                    if delta and getattr(delta, "content", None):
+                        piece = delta.content
+                        if piece:
+                            text_delta = piece
+                    if delta and getattr(delta, "audio", None):
+                        aud = delta.audio
+                        audio_b64 = aud.get("data") if isinstance(aud, dict) else getattr(aud, "data", None)
+                    if audio_b64 is None:
+                        msg = getattr(c0, "message", None)
+                        if msg and getattr(msg, "audio", None):
+                            ma = msg.audio
+                            audio_b64 = ma.get("data") if isinstance(ma, dict) else getattr(ma, "data", None)
+
+                if (text_delta is not None) or (audio_b64 is not None):
+                    loop.call_soon_threadsafe(q.put_nowait, OmniStreamPiece(text_delta=text_delta, audio_b64=audio_b64))
+        except BaseException as e:
+            loop.call_soon_threadsafe(q.put_nowait, e)
+        finally:
+            loop.call_soon_threadsafe(q.put_nowait, None)
+
+    worker = threading.Thread(target=_producer, daemon=True, name="OmniStreamProducer")
+    with _producer_threads_lock:
+        _producer_threads.add(worker)
+    worker.start()
+
+    try:
+        while True:
+            item = await q.get()
+            if item is None:
+                break
+            if isinstance(item, BaseException):
+                raise item
+            yield item
+    finally:
+        stop_event.set()
+        worker.join(timeout=1.0)
+        with _producer_threads_lock:
+            if not worker.is_alive():
+                _producer_threads.discard(worker)

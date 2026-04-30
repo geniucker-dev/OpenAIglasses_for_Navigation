@@ -13,7 +13,7 @@ STREAM_SW = 2
 BYTES_PER_20MS_16K = STREAM_SR * STREAM_SW * 20 // 1000  # 320B (8kHz)
 
 # ===== AI 播放任务总闸 =====
-current_ai_task: Optional[asyncio.Task] = None
+current_ai_task: Optional[asyncio.Task[Any]] = None
 
 async def cancel_current_ai():
     """取消当前大模型语音任务，并等待其退出。"""
@@ -36,7 +36,7 @@ def is_playing_now() -> bool:
 # ===== /stream.wav 连接管理 =====
 @dataclass(frozen=True)
 class StreamClient:
-    q: asyncio.Queue
+    q: asyncio.Queue[bytes | None]
     abort_event: asyncio.Event
 
 stream_clients: "Set[StreamClient]" = set()
@@ -76,21 +76,22 @@ async def hard_reset_audio(reason: str = ""):
     if reason:
         print(f"[HARD-RESET] {reason}")
 
-async def broadcast_pcm16_realtime(pcm16: bytes):
+async def broadcast_pcm16_realtime(pcm16: bytes, stop_event=None):
     """以 20ms 节拍把 pcm16 发送给所有仍存活的连接；队列满丢尾，保持实时。"""
-    # 【新增】录制音频（在分发之前整体录制，避免分片）
-    try:
-        import sync_recorder
-        sync_recorder.record_audio(pcm16, text="[Omni对话]")
-    except Exception:
-        pass  # 静默失败，不影响播放
-    
     loop = asyncio.get_event_loop()
     next_tick = loop.time()
     off = 0
     while off < len(pcm16):
+        if stop_event is not None and stop_event.is_set():
+            break
         take = min(BYTES_PER_20MS_16K, len(pcm16) - off)
         piece = pcm16[off:off + take]
+
+        try:
+            import sync_recorder
+            sync_recorder.record_audio(piece, text="[Omni对话]")
+        except Exception:
+            pass  # 静默失败，不影响播放
 
         dead: List[StreamClient] = []
         for sc in list(stream_clients):
