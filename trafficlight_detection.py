@@ -485,6 +485,11 @@ def start_detection():
     """启动红绿灯检测（在后台线程中运行）"""
     global _detection_thread, _stop_event, _detection_running
 
+    if _detection_thread is not None and not _detection_thread.is_alive():
+        _detection_thread = None
+        _stop_event = None
+        _detection_running = False
+
     if _detection_running:
         print("[TRAFFIC] 红绿灯检测已在运行中")
         return False
@@ -516,6 +521,9 @@ def stop_detection():
 
     if _detection_thread:
         _detection_thread.join(timeout=2.0)
+        if _detection_thread.is_alive():
+            print("[TRAFFIC] 红绿灯检测线程仍未退出")
+            return False
         _detection_thread = None
 
     _stop_event = None
@@ -676,6 +684,27 @@ def reset_detection_state():
     _last_detected_light = None
     _detection_history = []
     print("[TRAFFIC] 检测状态已重置")
+
+
+def reset_runtime_state(clear_model: bool = True):
+    """重置运行时状态（线程/状态/模型缓存）。"""
+    global _model, _detection_thread, _stop_event, _detection_running
+    reset_ok = True
+    if _detection_running:
+        try:
+            if not stop_detection():
+                reset_ok = False
+        except Exception:
+            reset_ok = False
+    if not reset_ok:
+        return False
+    _detection_thread = None
+    _stop_event = None
+    _detection_running = False
+    reset_detection_state()
+    if clear_model:
+        _model = None
+    return True
 
 
 if __name__ == "__main__":

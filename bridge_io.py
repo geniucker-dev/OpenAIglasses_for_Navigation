@@ -10,6 +10,7 @@ import numpy as np
 _MAX_BUF = 4
 _frames = deque(maxlen=_MAX_BUF)
 _cond = threading.Condition()
+_frame_epoch = 0
 
 # 向前端发送JPEG的回调，由 app_main.py 在启动时注册
 _sender_lock = threading.Lock()
@@ -33,17 +34,25 @@ def set_ui_sender(cb):
 
 def push_raw_jpeg(jpeg_bytes: bytes):
     """由 app_main.py 在收到 /ws/camera 帧时调用"""
+    global _frame_epoch
     if not jpeg_bytes:
         return
     with _cond:
-        _frames.append((time.time(), jpeg_bytes))
+        _frames.append((_frame_epoch, time.time(), jpeg_bytes))
         _cond.notify_all()
+
+def clear_frames():
+    global _frame_epoch
+    with _cond:
+        _frame_epoch += 1
+        _frames.clear()
 
 def wait_raw_bgr(timeout_sec: float = 0.5):
     """被 YOLO/MediaPipe 脚本调用：等待并拿到最新一帧BGR；超时返回 None"""
     t_end = time.time() + timeout_sec
     last = None
     while time.time() < t_end:
+        current_epoch = _frame_epoch
         with _cond:
             if _frames:
                 last = _frames[-1]
@@ -51,7 +60,11 @@ def wait_raw_bgr(timeout_sec: float = 0.5):
             time.sleep(0.01)
             continue
         # 解码JPEG为BGR
-        ts, jpeg = last
+        epoch, ts, jpeg = last
+        if epoch != current_epoch:
+            last = None
+            time.sleep(0.01)
+            continue
         arr = np.frombuffer(jpeg, dtype=np.uint8)
         bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
         if bgr is not None:

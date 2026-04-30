@@ -23,8 +23,6 @@ import mediapipe as mp
 from ultralytics import YOLO
 from ultralytics.utils.plotting import Colors
 import bridge_io
-import pygame  # 用于播放本地音频文件
-
 from audio_player import play_audio_threadsafe
 
 PERF_DEBUG = False  # 打印调试信息（False 关闭）
@@ -175,9 +173,6 @@ AUDIO_FILES = {
     "OK": os.path.join(AUDIO_DIR, "ok.wav"),  # 添加OK音效
 }
 GUIDANCE_INTERVAL_SEC = 1.5  # 引导播报间隔
-
-# 初始化pygame音频
-pygame.mixer.init()
 
 # ========= 窗口 =========
 WINDOW = "YOLO Seg + Flow Polygon (Peri-Relock) (Grab Guidance)"
