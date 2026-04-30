@@ -424,6 +424,14 @@
         $partial.textContent = s.slice(8); 
         return; 
       }
+      if (s === 'RESET_UI'){
+        const container = ensureChatContainer();
+        const messages = container.querySelectorAll('.message, .timestamp');
+        messages.forEach(msg => msg.remove());
+        lastTimestamp = 0;
+        $partial.textContent = '（等待音频…）';
+        return;
+      }
       if (s.startsWith('FINAL:')){
         const text = s.slice(6);
         if (text.startsWith('[AI]')) {
@@ -936,8 +944,12 @@ import { GLTFLoader } from 'https://unpkg.com/three@0.155.0/examples/jsm/loaders
       let dt = (!lastTS || (t-lastTS)<=0 || (t-lastTS)>300) ? 0.02 : (t-lastTS)/1000;
       lastTS = t;
 
-      let ax = Number(d?.accel?.x)||0, ay=Number(d?.accel?.y)||0, az=Number(d?.accel?.z)||0;
-      let wx = Number(d?.gyro ?.x)||0, wy=Number(d?.gyro ?.y)||0, wz=Number(d?.gyro ?.z)||0;
+      // 原始IMU坐标：x朝前，y朝上，z朝右
+      // 统一业务坐标：x朝前，y朝左，z朝上
+      const axRaw = Number(d?.accel?.x)||0, ayRaw=Number(d?.accel?.y)||0, azRaw=Number(d?.accel?.z)||0;
+      const wxRaw = Number(d?.gyro ?.x)||0, wyRaw=Number(d?.gyro ?.y)||0, wzRaw=Number(d?.gyro ?.z)||0;
+      let ax = axRaw, ay = -azRaw, az = ayRaw;
+      let wx = wxRaw, wy = -wzRaw, wz = wyRaw;
 
       const fxr = fx.push(ax), fyr=fy.push(ay), fzr=fz.push(az);
       const gxr = gx.push(wx), gyr=gy.push(wy), gzr=gz.push(wz);
@@ -952,8 +964,9 @@ import { GLTFLoader } from 'https://unpkg.com/three@0.155.0/examples/jsm/loaders
       const gmag = Math.hypot(gLP.x, gLP.y, gLP.z) || 1;
       const gHat = { x: gLP.x/gmag, y: gLP.y/gmag, z: gLP.z/gmag };
 
-      const roll  = rad2deg(Math.atan2(az, ay));
-      const pitch = rad2deg(Math.atan2(-ax, ay));
+      // 机体坐标约定：x 朝前，y 朝左，z 朝上
+      const roll  = rad2deg(Math.atan2(ay, az));
+      const pitch = rad2deg(Math.atan2(-ax, Math.hypot(ay, az)));
 
       const aNorm = Math.hypot(ax,ay,az);
       const wNorm = Math.hypot(wx,wy,wz);
@@ -972,7 +985,7 @@ import { GLTFLoader } from 'https://unpkg.com/three@0.155.0/examples/jsm/loaders
 
       let yawdot = useProj
         ? ( (wx - gOff.x)*gHat.x + (wy - gOff.y)*gHat.y + (wz - gOff.z)*gHat.z )
-        : ( wy - gOff.y );
+        : ( wz - gOff.z );
 
       if (Math.abs(yawdot) < YAW_DB) yawdot = 0;
       if (freezeStill && stillCond) yawdot = 0;
