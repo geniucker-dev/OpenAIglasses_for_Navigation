@@ -1,6 +1,6 @@
 # app_main.py
 # -*- coding: utf-8 -*-
-import os, sys, time, json, asyncio, base64, audioop
+import os, sys, time, json, asyncio
 from typing import Any, Dict, Optional, Tuple, List, Callable, Set, Deque
 from collections import deque
 from dataclasses import dataclass
@@ -68,13 +68,10 @@ SILENCE_20MS = bytes(BYTES_CHUNK)
 # ---- 引入我们的模块 ----
 from audio_stream import (
     register_stream_route,  # 挂 /stream.wav
-    broadcast_pcm16_realtime,  # 实时向连接分发 16k PCM
     hard_reset_audio,  # 音频+AI 播放总闸
-    BYTES_PER_20MS_16K,
     is_playing_now,
-    current_ai_task,
 )
-from omni_client import stream_chat, OmniStreamPiece, cleanup_producer_threads
+from omni_client import cleanup_producer_threads
 from asr_core import (
     ASRCallback,
     set_current_recognition,
@@ -623,14 +620,20 @@ async def start_ai_with_text_custom(user_text: str):
             nav_control_keywords = [
                 "开始过马路",
                 "过马路结束",
+                "结束过马路",
+                "停止过马路",
+                "取消过马路",
                 "开始导航",
                 "盲道导航",
                 "停止导航",
                 "结束导航",
+                "取消导航",
                 "检测红绿灯",
                 "看红绿灯",
                 "停止检测",
+                "取消检测",
                 "停止红绿灯",
+                "取消红绿灯",
             ]
             is_nav_control = any(
                 keyword in user_text for keyword in nav_control_keywords
@@ -667,7 +670,12 @@ async def start_ai_with_text_custom(user_text: str):
             await ui_broadcast_final("[系统] 导航系统未就绪")
         return
 
-    if "过马路结束" in user_text or "结束过马路" in user_text:
+    if (
+        "过马路结束" in user_text
+        or "结束过马路" in user_text
+        or "停止过马路" in user_text
+        or "取消过马路" in user_text
+    ):
         if orchestrator:
             orchestrator.stop_navigation()
             print(f"[CROSS_STREET] 导航已停止，状态: {orchestrator.get_state()}")
@@ -705,7 +713,12 @@ async def start_ai_with_text_custom(user_text: str):
             await ui_broadcast_final(f"[系统] 启动失败: {e}")
         return
 
-    if "停止检测" in user_text or "停止红绿灯" in user_text:
+    if (
+        "停止检测" in user_text
+        or "取消检测" in user_text
+        or "停止红绿灯" in user_text
+        or "取消红绿灯" in user_text
+    ):
         try:
             if not reset_trafficlight_runtime_state():
                 raise RuntimeError("红绿灯检测运行态清理失败")
@@ -740,7 +753,7 @@ async def start_ai_with_text_custom(user_text: str):
             await ui_broadcast_final("[系统] 导航系统未就绪")
         return
 
-    if "停止导航" in user_text or "结束导航" in user_text:
+    if "停止导航" in user_text or "结束导航" in user_text or "取消导航" in user_text:
         if orchestrator:
             orchestrator.stop_navigation()
             print(f"[NAVIGATION] 导航已停止，状态: {orchestrator.get_state()}")
@@ -752,10 +765,14 @@ async def start_ai_with_text_custom(user_text: str):
     nav_cmd_keywords = [
         "开始过马路",
         "过马路结束",
+        "结束过马路",
+        "停止过马路",
+        "取消过马路",
         "开始导航",
         "盲道导航",
         "停止导航",
         "结束导航",
+        "取消导航",
         "立即通过",
         "现在通过",
         "继续",
@@ -838,148 +855,8 @@ async def start_ai_with_text_custom(user_text: str):
 
         return
 
-    # 如果不是特殊命令，执行原有的AI对话逻辑
-    # 但如果yolomedia正在运行，暂时不处理普通对话
-    if yolomedia_running:
-        print("[AI] YOLO media is running, skipping normal AI response", flush=True)
-        return
-
-    if not cleanup_producer_threads():
-        await ui_broadcast_final("[系统] 上一次AI会话尚未完全清理，请稍后再试")
-        return
-
-    bump_omni_generation()
-
-    # 【修改】omni对话开始时，切换到CHAT模式
-    global omni_conversation_active, omni_previous_nav_state
-    omni_conversation_active = True
-
-    # 保存当前导航状态并切换到CHAT模式
-    if orchestrator:
-        current_state = orchestrator.get_state()
-        # 只有在导航模式下才需要保存和切换
-        if current_state not in ["CHAT", "IDLE"]:
-            omni_previous_nav_state = current_state
-            orchestrator.force_state("CHAT")
-            print(f"[OMNI] 对话开始，从{current_state}切换到CHAT模式")
-        else:
-            omni_previous_nav_state = None
-            print(f"[OMNI] 对话开始（当前已在{current_state}模式）")
-
-    # 原有的AI对话逻辑
-    await start_ai_with_text(user_text)
-
-
-# ========= Omni 播放启动 =========
-async def start_ai_with_text(user_text: str):
-    """硬重置后，开启新的 AI 语音输出。"""
-    session_generation = omni_session_generation
-    task: Optional[asyncio.Task[Any]] = None
-
-    async def _runner():
-        txt_buf: List[str] = []
-        rate_state = None
-
-        # 组装（图像+文本）
-        content_list = []
-        if last_frames:
-            try:
-                _, jpeg_bytes = last_frames[-1]
-                img_b64 = base64.b64encode(jpeg_bytes).decode("ascii")
-                content_list.append(
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"},
-                    }
-                )
-            except Exception:
-                pass
-        content_list.append({"type": "text", "text": user_text})
-
-        try:
-            async for piece in stream_chat(
-                content_list, voice="Cherry", audio_format="wav"
-            ):
-                # 文本增量（仅 UI）
-                if piece.text_delta:
-                    txt_buf.append(piece.text_delta)
-                    try:
-                        await ui_broadcast_partial("[AI] " + "".join(txt_buf))
-                    except Exception:
-                        pass
-
-                # 音频分片：Omni 返回 24k (PCM16) 的 wav audio.data（Base64）；下行需要 8k PCM16
-                if piece.audio_b64:
-                    try:
-                        pcm24 = base64.b64decode(piece.audio_b64)
-                    except Exception:
-                        pcm24 = b""
-                    if pcm24:
-                        # 24k → 8k (使用ratecv保证音调和速度不变)
-                        pcm8k, rate_state = audioop.ratecv(
-                            pcm24, 2, 1, 24000, 8000, rate_state
-                        )
-                        pcm8k = audioop.mul(pcm8k, 2, 0.60)
-                        if pcm8k:
-                            await broadcast_pcm16_realtime(pcm8k)
-
-        except asyncio.CancelledError:
-            # 被新一轮打断
-            raise
-        except Exception as e:
-            try:
-                await ui_broadcast_final(f"[AI] 发生错误：{e}")
-            except Exception:
-                pass
-        finally:
-            from audio_stream import __dict__ as _audio_stream_dict
-            if task is not None and _audio_stream_dict.get("current_ai_task") is task:
-                _audio_stream_dict["current_ai_task"] = None
-
-            # 【修改】标记omni对话结束，恢复之前的导航模式
-            global omni_conversation_active, omni_previous_nav_state
-            if session_generation != omni_session_generation:
-                return
-            omni_conversation_active = False
-
-            # 恢复之前的导航状态
-            if orchestrator and omni_previous_nav_state:
-                orchestrator.force_state(omni_previous_nav_state)
-                print(f"[OMNI] 对话结束，恢复到{omni_previous_nav_state}模式")
-                omni_previous_nav_state = None
-            else:
-                print(f"[OMNI] 对话结束（无需恢复导航状态）")
-
-            # 自然结束时，给当前连接一个 "完结" 信号
-            from audio_stream import stream_clients  # 局部导入，避免环依赖
-
-            for sc in list(stream_clients):
-                if not sc.abort_event.is_set():
-                    try:
-                        sc.q.put_nowait(b"\x00" * BYTES_PER_20MS_16K)  # 一帧静音
-                    except Exception:
-                        pass
-                    try:
-                        sc.q.put_nowait(None)
-                    except Exception:
-                        pass
-
-            final_text = ("".join(txt_buf)).strip() or "（空响应）"
-            try:
-                await ui_broadcast_final("[AI] " + final_text)
-            except Exception:
-                pass
-
-    # 真正启动前先硬重置，保证**绝无**旧音频残留
-    await hard_reset_audio("start_ai_with_text")
-    loop = asyncio.get_running_loop()
-    from audio_stream import current_ai_task as _task_holder  # 读写模块内全局
-    from audio_stream import __dict__ as _as_dict
-
-    # 设置模块内的 current_ai_task
-    task = loop.create_task(_runner())
-    _as_dict["current_ai_task"] = task
-
+    print(f"[COMMAND] No keyword matched, ignoring text: {user_text}", flush=True)
+    return
 
 # ---------- 页面 / 健康 ----------
 @app.get("/", response_class=HTMLResponse)
@@ -1380,11 +1257,13 @@ async def ws_camera_esp(ws: WebSocket):
                     try:
                         # 【新增】检查是否在红绿灯检测模式
                         if current_state == "TRAFFIC_LIGHT_DETECTION":
-                            # 红绿灯检测模式：在主线程中直接处理，避免掉帧
+                            # 红绿灯检测较重，放到线程里避免阻塞控制命令和UI消息
                             import trafficlight_detection
 
-                            result = trafficlight_detection.process_single_frame(
-                                bgr, ui_broadcast_callback=ui_broadcast_final
+                            result = await asyncio.to_thread(
+                                trafficlight_detection.process_single_frame,
+                                bgr,
+                                ui_broadcast_callback=ui_broadcast_final,
                             )
                             out_img = (
                                 result["vis_image"]
@@ -1392,12 +1271,18 @@ async def ws_camera_esp(ws: WebSocket):
                                 else bgr
                             )
                         else:
-                            # 其他模式：正常的导航处理
-                            res = orchestrator.process_frame(bgr)
+                            # 导航/过马路处理较重，放到线程里避免卡住 debug_text/停止命令
+                            res = await asyncio.to_thread(orchestrator.process_frame, bgr)
 
                             # 语音引导（内部已节流）
                             # 注：omni对话时已切换到CHAT模式，不会生成导航语音
-                            if res.guidance_text:
+                            state_after_processing = (
+                                orchestrator.get_state() if orchestrator else current_state
+                            )
+                            if (
+                                state_after_processing not in ["CHAT", "IDLE"]
+                                and res.guidance_text
+                            ):
                                 try:
                                     # 先播放语音，再广播到UI
                                     play_voice_text(res.guidance_text)
