@@ -857,7 +857,7 @@ import { GLTFLoader } from 'https://unpkg.com/three@0.155.0/examples/jsm/loaders
 
   // ===== IMU 数学与数据通道（原逻辑保持） =====
   // 安装补偿
-  const MOUNT_RX = 0, MOUNT_RY = -90, MOUNT_RZ = 0;
+  const MOUNT_RX = -90, MOUNT_RY = -90, MOUNT_RZ = 0;
   const qMount = new THREE.Quaternion()
     .multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0), THREE.MathUtils.degToRad(MOUNT_RY)))
     .multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,0,1), THREE.MathUtils.degToRad(MOUNT_RZ)))
@@ -1015,9 +1015,9 @@ import { GLTFLoader } from 'https://unpkg.com/three@0.155.0/examples/jsm/loaders
       const Y = wrap180(Yf - ref.yaw);
 
       const qBody = new THREE.Quaternion()
-        .multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0), THREE.MathUtils.degToRad(Y)))
-        .multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,0,1), THREE.MathUtils.degToRad(P)))
-        .multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1,0,0), THREE.MathUtils.degToRad(R)));
+        .multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,0,1), THREE.MathUtils.degToRad(Y)))
+        .multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0), THREE.MathUtils.degToRad(-P)))
+        .multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1,0,0), THREE.MathUtils.degToRad(-R)));
       const q = qMount.clone().multiply(qBody);
 
       if (FOLLOW >= 0.999) group.setRotationFromQuaternion(q);
