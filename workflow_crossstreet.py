@@ -1110,7 +1110,7 @@ class CrossStreetNavigator:
             logger.error(f"[_add_obstacle_visualization] 添加障碍物可视化失败: {e}")
 
     def _draw_command_button(self, image, text):
-        """绘制底部中央的指令按钮（类似yolomedia风格）"""
+        """绘制底部中央的指令按钮"""
         try:
             H, W = image.shape[:2]
             full_text = f"当前指令：{text if text else '—'}"

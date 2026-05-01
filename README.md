@@ -2,7 +2,7 @@
 
 <div align="center">
 
-一个面向视障人士的智能导航与辅助系统，集成了盲道导航、过马路辅助、物品识别、实时语音交互等功能。  本项目仅为交流学习使用，请勿直接给视障人群使用。本项目内仅包含代码，模型地址：https://www.modelscope.cn/models/archifancy/AIGlasses_for_navigation  。下载后存放在/model 文件夹
+一个面向视障人士的智能导航与辅助系统，集成了盲道导航、过马路辅助、实时语音交互等功能。  本项目仅为交流学习使用，请勿直接给视障人群使用。本项目内仅包含代码，模型地址：https://www.modelscope.cn/models/archifancy/AIGlasses_for_navigation  。下载后存放在/model 文件夹
 
 [功能特性](#功能特性) • [快速开始](#快速开始) • [系统架构](#系统架构) • [使用说明](#使用说明) • [开发文档](#开发文档)
 
@@ -38,16 +38,9 @@
 - **对齐引导**：引导用户对准斑马线中心
 - **安全提醒**：绿灯时语音提示可以通行
 
-### 🔍 物品识别与查找
-- **智能物品搜索**：语音指令查找物品（如"帮我找一下红牛"）
-- **实时目标追踪**：使用 YOLO-E 开放词汇检测 + ByteTrack 追踪
-- **手部引导**：结合 MediaPipe 手部检测，引导用户手部靠近物品
-- **抓取检测**：检测手部握持动作，确认物品已拿到
-- **多模态反馈**：视觉标注 + 语音引导 + 居中提示
-
 ### 🎙️ 实时语音交互
 - **语音识别（ASR）**：基于阿里云 DashScope Paraformer 实时语音识别
-- **智能指令解析**：自动识别导航、查找、红绿灯检测等系统指令
+- **智能指令解析**：自动识别导航、红绿灯检测等系统指令
 - **上下文感知**：在不同模式下智能过滤无关指令
 
 ### 📹 视频与音频处理
@@ -84,7 +77,7 @@
 
 ### API 密钥
 - **阿里云 DashScope API Key**（必需）：
-  - 用于语音识别（ASR）和 Qwen-Turbo 标签提取
+  - 用于语音识别（ASR）
   - 申请地址：https://dashscope.console.aliyun.com/
 
 ## 🚀 快速开始
@@ -120,10 +113,8 @@ uv pip install --torch-backend=auto torch torchvision ultralytics "clip @ git+ht
 | 模型文件 | 用途 | 大小 | 下载链接 |
 |---------|------|------|---------|
 | `yolo-seg.pt` | 盲道分割 | ~50MB | [待补充] |
-| `yoloe-11l-seg.pt` | 开放词汇检测 | ~80MB | [待补充] |
-| `shoppingbest5.pt` | 物品识别 | ~30MB | [待补充] |
+| `yoloe-11l-seg.pt` | 开放词汇障碍物检测 | ~80MB | [待补充] |
 | `trafficlight.pt` | 红绿灯检测 | ~20MB | [待补充] |
-| `hand_landmarker.task` | 手部检测 | ~15MB | [MediaPipe Models](https://developers.google.com/mediapipe/solutions/vision/hand_landmarker#models) |
 
 ### 4. 配置 API 密钥
 
@@ -132,12 +123,6 @@ uv pip install --torch-backend=auto torch torchvision ultralytics "clip @ git+ht
 ```bash
 # .env
 DASHSCOPE_API_KEY=your_api_key_here
-```
-
-或在代码中直接修改（不推荐）：
-```python
-# app_main.py, line 50
-API_KEY = "your_api_key_here"
 ```
 
 ### 5. 补充缺失的音频文件
@@ -221,22 +206,22 @@ uv run pio run --target upload
 │    ┌─────────────────────────────────────────────────┐       │
 │    │  NavigationMaster (navigation_master.py)         │       │
 │    │  - 状态机：IDLE/CHAT/BLINDPATH_NAV/              │       │
-│    │            CROSSING/TRAFFIC_LIGHT/ITEM_SEARCH    │       │
+│    │            CROSSING/TRAFFIC_LIGHT                │       │
 │    │  - 模式切换与协调                                │       │
-│    └───┬─────────────────────┬───────────────────┬───┘       │
-│        │                     │                   │            │
-│   ┌────▼────────┐   ┌────────▼────────┐   ┌─────▼──────┐   │
-│   │ 盲道导航     │   │  过马路导航      │   │ 物品查找    │   │
-│   │(blindpath)   │   │ (crossstreet)   │   │(yolomedia)  │   │
-│   └──────────────┘   └──────────────────┘   └─────────────┘   │
+│    └───┬─────────────────────┬───────────────────────┘       │
+│        │                     │                               │
+│   ┌────▼────────┐   ┌────────▼────────┐                      │
+│   │ 盲道导航     │   │  过马路导航      │                      │
+│   │(blindpath)   │   │ (crossstreet)   │                      │
+│   └──────────────┘   └──────────────────┘                    │
 └───────────────────────────────────────────────────────────────┘
           │                  │                  │
 ┌─────────▼──────────────────▼──────────────────▼──────────────┐
 │                       模型推理层                              │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐       │
-│  │ YOLO 分割     │  │  YOLO-E 检测 │  │ MediaPipe    │       │
-│  │ (盲道/斑马线) │  │ (开放词汇)   │  │  (手部检测)   │       │
-│  └──────────────┘  └──────────────┘  └──────────────┘       │
+│  ┌──────────────┐  ┌──────────────┐                         │
+│  │ YOLO 分割     │  │  YOLO-E 检测 │                         │
+│  │ (盲道/斑马线) │  │ (障碍物)     │                         │
+│  └──────────────┘  └──────────────┘                         │
 │  ┌──────────────┐  ┌──────────────┐                         │
 │  │ 红绿灯检测    │  │ 光流稳定      │                         │
 │  │(HSV+YOLO)     │  │(Lucas-Kanade)│                         │
@@ -248,7 +233,6 @@ uv run pio run --target upload
 │  ┌──────────────────────────────────────────────┐            │
 │  │  阿里云 DashScope API                         │            │
 │  │  - Paraformer ASR (实时语音识别)              │            │
-│  │  - Qwen-Turbo (标签提取)                      │            │
 │  └──────────────────────────────────────────────┘            │
 └───────────────────────────────────────────────────────────────┘
 ```
@@ -261,7 +245,6 @@ uv run pio run --target upload
 | **导航统领** | `navigation_master.py` | 状态机管理、模式切换、语音节流 |
 | **盲道导航** | `workflow_blindpath.py` | 盲道检测、避障、转弯引导 |
 | **过马路导航** | `workflow_crossstreet.py` | 斑马线检测、红绿灯识别、对齐引导 |
-| **物品查找** | `yolomedia.py` | 物品检测、手部引导、抓取确认 |
 | **语音识别** | `asr_core.py` | 实时 ASR、VAD、指令解析 |
 | **音频播放** | `audio_player.py` | 多路混音、TTS 播放、音量控制 |
 | **视频录制** | `sync_recorder.py` | 音视频同步录制 |
@@ -285,16 +268,6 @@ uv run pio run --target upload
 ```
 "检测红绿灯" / "看红绿灯"   → 启动红绿灯检测
 "停止检测" / "停止红绿灯"   → 停止检测
-```
-
-#### 物品查找
-```
-"帮我找一下 [物品名]"       → 启动物品搜索
-  示例：
-  - "帮我找一下红牛"
-  - "找一下AD钙奶"
-  - "帮我找矿泉水"
-"找到了" / "拿到了"         → 确认找到物品
 ```
 
 ### 导航状态说明
@@ -325,12 +298,7 @@ uv run pio run --target upload
    - **CROSSING**: 过马路中
    - **SEEKING_NEXT_BLINDPATH**: 寻找对面盲道
 
-5. **ITEM_SEARCH** - 物品查找
-   - 实时检测目标物品
-   - 引导手部靠近
-   - 确认抓取
-
-6. **TRAFFIC_LIGHT_DETECTION** - 红绿灯检测
+5. **TRAFFIC_LIGHT_DETECTION** - 红绿灯检测
    - 实时检测红绿灯状态
    - 语音播报颜色变化
 
@@ -435,10 +403,6 @@ TRAFFIC_LIGHT_MODEL=/your/path/trafficlight.pt
 根据硬件性能调整：
 
 ```python
-# yolomedia.py
-HAND_DOWNSCALE = 0.8    # 手部检测降采样（越小越快，精度降低）
-HAND_FPS_DIV = 1        # 手部检测抽帧（2=隔帧，3=每3帧）
-
 # workflow_blindpath.py  
 FEATURE_PARAMS = dict(
     maxCorners=600,      # 光流特征点数（越少越快）
@@ -472,7 +436,7 @@ curl -X POST http://localhost:8081/api/debug_text \
   -d '{"text":"开始过马路"}'
 ```
 
-适合在不接麦克风或不想等待 ASR 时直接验证状态切换、过马路流程和物品查找入口。
+适合在不接麦克风或不想等待 ASR 时直接验证状态切换、过马路流程。
 
 ### 扩展导航功能
 
@@ -536,12 +500,7 @@ import logging
 logging.basicConfig(level=logging.DEBUG)
 ```
 
-2. **查看帧率瓶颈**：
-
-```python
-# yolomedia.py
-PERF_DEBUG = True  # 打印处理时间
-```
+2. **查看帧率瓶颈**：关注 `workflow_blindpath.py`、`workflow_crossstreet.py` 和 `trafficlight_detection.py` 的单帧处理耗时。
 
 3. **测试单个模块**：
 

@@ -48,7 +48,7 @@ def clear_frames():
         _frames.clear()
 
 def wait_raw_bgr(timeout_sec: float = 0.5):
-    """被 YOLO/MediaPipe 脚本调用：等待并拿到最新一帧BGR；超时返回 None"""
+    """等待并拿到最新一帧BGR；超时返回 None"""
     t_end = time.time() + timeout_sec
     last = None
     while time.time() < t_end:
@@ -76,7 +76,7 @@ def wait_raw_bgr(timeout_sec: float = 0.5):
     return None
 
 def send_vis_bgr(bgr, quality: int = 80):
-    """被 YOLO/MediaPipe 脚本调用：把处理后画面推给前端 viewer"""
+    """把处理后画面推给前端 viewer"""
     if bgr is None:
         return
     

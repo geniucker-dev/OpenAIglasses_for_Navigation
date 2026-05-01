@@ -3,10 +3,7 @@
 import os, sys, time, json, asyncio
 from typing import Any, Dict, Optional, List, Callable, Set
 from contextlib import asynccontextmanager
-import re
 
-# 在其它 import 之后加：
-from qwen_extractor import extract_english_label
 from navigation_master import NavigationMaster, OrchestratorResult
 
 # 新增：导入盲道导航器
@@ -29,10 +26,7 @@ from device_utils import DEVICE, IS_CUDA
 import torch  # 添加这行
 
 
-import mediapipe as mp
 import bridge_io
-import threading
-import yolomedia  # 确保和 app_main.py 同目录，文件名就是 yolomedia.py
 
 # ---- Windows 事件循环策略 ----
 if sys.platform.startswith("win"):
@@ -290,20 +284,6 @@ interrupt_lock = asyncio.Lock()
 audio_ws_claim_lock = asyncio.Lock()
 camera_ws_claim_lock = asyncio.Lock()
 
-# ============== YOLO媒体线程管理 =================
-yolomedia_thread: Optional[threading.Thread] = None
-yolomedia_stop_event = threading.Event()
-yolomedia_running = False
-yolomedia_sending_frames = False  # 新增：标记YOLO是否已经开始发送处理后的帧
-
-# 物品名称到YOLO类别的映射
-ITEM_TO_CLASS_MAP = {
-    "红牛": "Red_Bull",
-    "AD钙奶": "AD_milk",
-    "ad钙奶": "AD_milk",
-    "钙奶": "AD_milk",
-}
-
 
 async def ui_broadcast_raw(msg: str):
     dead = []
@@ -444,14 +424,7 @@ async def full_system_reset(reason: str = "") -> bool:
     reset_imu_runtime_state()
     traffic_reset_ok = reset_trafficlight_runtime_state()
     bridge_io.clear_frames()
-
-    # 2.5) 停止运行中的找物品线程
-    yolomedia_stopped = stop_yolomedia()
-    if not yolomedia_stopped:
-        print("[SYSTEM] full reset incomplete: yolomedia still running.", flush=True)
-
-    if yolomedia_stopped:
-        clear_navigation_session_state()
+    clear_navigation_session_state()
 
     # 3) UI
     await ui_broadcast_raw("RESET_UI")
@@ -467,98 +440,11 @@ async def full_system_reset(reason: str = "") -> bool:
     if not traffic_reset_ok:
         print("[SYSTEM] full reset incomplete: traffic-light runtime reset failed.", flush=True)
 
-    if yolomedia_stopped and recognition_stopped and traffic_reset_ok:
+    if recognition_stopped and traffic_reset_ok:
         print("[SYSTEM] full reset done.", flush=True)
     else:
         print("[SYSTEM] full reset incomplete.", flush=True)
-    return bool(yolomedia_stopped and recognition_stopped and traffic_reset_ok)
-
-
-# ========= 启动/停止 YOLO 媒体处理 =========
-def start_yolomedia_with_target(target_name: str) -> bool:
-    """启动yolomedia线程，搜索指定物品"""
-    global \
-        yolomedia_thread, \
-        yolomedia_stop_event, \
-        yolomedia_running, \
-        yolomedia_sending_frames
-
-    # 如果已经在运行，先停止
-    if yolomedia_running:
-        if not stop_yolomedia():
-            return False
-
-    # 查找对应的YOLO类别
-    yolo_class = ITEM_TO_CLASS_MAP.get(target_name, target_name)
-    print(
-        f"[YOLOMEDIA] Starting with target: {target_name} -> YOLO class: {yolo_class}",
-        flush=True,
-    )
-    print(
-        f"[YOLOMEDIA] Available mappings: {ITEM_TO_CLASS_MAP}", flush=True
-    )  # 添加这行调试
-
-    yolomedia_stop_event.clear()
-    yolomedia_running = True
-    yolomedia_sending_frames = False  # 重置发送帧状态
-    worker_started = threading.Event()
-
-    def _run():
-        worker_started.set()
-        try:
-            # 传递目标类别名和停止事件
-            yolomedia.main(
-                headless=True, prompt_name=yolo_class, stop_event=yolomedia_stop_event
-            )
-        except Exception as e:
-            print(f"[YOLOMEDIA] worker stopped: {e}", flush=True)
-        finally:
-            global yolomedia_running, yolomedia_sending_frames
-            yolomedia_running = False
-            yolomedia_sending_frames = False
-
-    yolomedia_thread = threading.Thread(target=_run, daemon=True)
-    yolomedia_thread.start()
-    worker_started.wait(timeout=0.2)
-    if yolomedia_thread is None or not yolomedia_thread.is_alive():
-        yolomedia_running = False
-        yolomedia_sending_frames = False
-        return False
-    print(
-        f"[YOLOMEDIA] background worker started for: {yolo_class}（正在初始化，暂时显示原始画面）",
-        flush=True,
-    )
-    return True
-
-
-def stop_yolomedia() -> bool:
-    """停止yolomedia线程"""
-    global \
-        yolomedia_thread, \
-        yolomedia_stop_event, \
-        yolomedia_running, \
-        yolomedia_sending_frames
-
-    if yolomedia_running:
-        print("[YOLOMEDIA] Stopping worker...", flush=True)
-        yolomedia_stop_event.set()
-
-        # 等待线程结束（最多等5秒）
-        if yolomedia_thread and yolomedia_thread.is_alive():
-            yolomedia_thread.join(timeout=5.0)
-
-        if yolomedia_thread and yolomedia_thread.is_alive():
-            print("[YOLOMEDIA] Worker still alive after stop timeout.", flush=True)
-            return False
-
-        yolomedia_thread = None
-        yolomedia_running = False
-        yolomedia_sending_frames = False
-
-        # 【新增】如果orchestrator在找物品模式，结束时不自动恢复（由命令控制）
-        # 只清理标志位即可
-        print("[YOLOMEDIA] Worker stopped, 等待状态切换.", flush=True)
-    return True
+    return bool(recognition_stopped and traffic_reset_ok)
 
 
 # ========= 自定义文本指令处理，支持识别特殊命令 =========
@@ -573,13 +459,6 @@ async def handle_command_text(user_text: str):
 
     # 【修改】检查是否是过马路相关命令 - 使用orchestrator控制
     if "开始过马路" in user_text or "帮我过马路" in user_text:
-        # 【新增】如果正在找物品，先停止
-        if yolomedia_running:
-            if not stop_yolomedia():
-                await ui_broadcast_final("[系统] 找物品任务仍在停止中，请稍后再试")
-                return
-            print("[ITEM_SEARCH] 从找物品模式切换到过马路")
-
         if orchestrator:
             orchestrator.start_crossing()
             print(f"[CROSS_STREET] 过马路模式已启动，状态: {orchestrator.get_state()}")
@@ -659,13 +538,6 @@ async def handle_command_text(user_text: str):
 
     # 【修改】检查是否是导航相关命令 - 使用orchestrator控制
     if "开始导航" in user_text or "盲道导航" in user_text or "帮我导航" in user_text:
-        # 【新增】如果正在找物品，先停止
-        if yolomedia_running:
-            if not stop_yolomedia():
-                await ui_broadcast_final("[系统] 找物品任务仍在停止中，请稍后再试")
-                return
-            print("[ITEM_SEARCH] 从找物品模式切换到盲道导航")
-
         if orchestrator:
             orchestrator.start_blind_path_navigation()
             print(f"[NAVIGATION] 盲道导航已启动，状态: {orchestrator.get_state()}")
@@ -705,76 +577,6 @@ async def handle_command_text(user_text: str):
             await ui_broadcast_final("[系统] 导航模式已更新")
         else:
             await ui_broadcast_final("[系统] 导航统领器未初始化")
-        return
-
-    # 检查是否是"帮我找/识别一下xxx"的命令
-    # 扩展正则表达式，支持更多关键词
-    find_pattern = r"(?:^\s*帮我)?\s*找一下\s*(.+?)(?:。|！|？|$)"
-    match = re.search(find_pattern, user_text)
-
-    if match:
-        # 提取中文物品名称
-        item_cn = match.group(1).strip()
-        if item_cn:
-            # 【新增】用本地映射 + Qwen 提取英文类名
-            label_en, src = extract_english_label(item_cn)
-            print(
-                f"[COMMAND] Finder request: '{item_cn}' -> '{label_en}' (src={src})",
-                flush=True,
-            )
-
-            if not orchestrator:
-                await ui_broadcast_final("[系统] 导航系统未就绪")
-                return
-
-            # 【新增】切换到找物品模式（暂停导航）
-            # 【关键】把英文类名传给 yolomedia（它会在找不到类时自动切 YOLOE）
-            if not start_yolomedia_with_target(label_en):
-                await ui_broadcast_final("[找物品] 上一次找物品任务仍在停止中，请稍后再试。")
-                return
-
-            # 【新增】切换到找物品模式（暂停导航）
-            orchestrator.start_item_search()
-            print(
-                f"[ITEM_SEARCH] 已切换到找物品模式，状态: {orchestrator.get_state()}"
-            )
-
-            # 给前端/语音来个确认反馈
-            try:
-                await ui_broadcast_final(f"[找物品] 正在寻找 {item_cn}...")
-            except Exception:
-                pass
-
-            return
-
-    # 检查是否是"找到了"的命令
-    if "找到了" in user_text or "拿到了" in user_text:
-        print("[COMMAND] Found command detected", flush=True)
-        # 停止yolomedia
-        if not stop_yolomedia():
-            await ui_broadcast_final("[找物品] 当前找物品任务仍在停止中，请稍后再试。")
-            return
-
-        # 【新增】停止找物品模式，恢复之前的导航状态
-        if orchestrator:
-            orchestrator.stop_item_search(restore_nav=True)
-            current_state = orchestrator.get_state()
-            print(f"[ITEM_SEARCH] 找物品结束，当前状态: {current_state}")
-
-            # 根据恢复的状态给出反馈
-            if current_state in [
-                "BLINDPATH_NAV",
-                "SEEKING_CROSSWALK",
-                "WAIT_TRAFFIC_LIGHT",
-                "CROSSING",
-                "SEEKING_NEXT_BLINDPATH",
-            ]:
-                await ui_broadcast_final("[找物品] 已找到物品，继续导航。")
-            else:
-                await ui_broadcast_final("[找物品] 已找到物品。")
-        else:
-            await ui_broadcast_final("[找物品] 已找到物品。")
-
         return
 
     print(f"[COMMAND] No keyword matched, ignoring text: {user_text}", flush=True)
@@ -1119,15 +921,13 @@ async def ws_camera_esp(ws: WebSocket):
                     if frame_counter % 100 == 0:  # 避免日志刷屏
                         print(f"[RECORDER] 录制帧失败: {e}")
 
-                # 推送到bridge_io（供yolomedia使用）
+                # 保留原始帧缓存，供需要桥接原始画面的工作流使用
                 bridge_io.push_raw_jpeg(data)
 
                 # 【调试】检查导航条件
                 if frame_counter % 30 == 0:  # 每30帧输出一次
                     state_dbg = orchestrator.get_state() if orchestrator else "N/A"
-                    print(
-                        f"[NAVIGATION DEBUG] 帧:{frame_counter}, state={state_dbg}, yolomedia_running={yolomedia_running}"
-                    )
+                    print(f"[NAVIGATION DEBUG] 帧:{frame_counter}, state={state_dbg}")
 
                 # 统一解码（添加更严格的异常处理）
                 try:
@@ -1143,29 +943,9 @@ async def ws_camera_esp(ws: WebSocket):
                         print(f"[JPEG] 解码异常: {e}")
                     bgr = None
 
-                # 【托管】优先交给统领状态机（寻物未占用画面时）
-                # 【修改】找物品模式时不执行导航处理，让yolomedia接管画面
-                if orchestrator and not yolomedia_running and bgr is not None:
+                # 【托管】优先交给统领状态机
+                if orchestrator and bgr is not None:
                     current_state = orchestrator.get_state()
-
-                    # 【新增】找物品模式：不处理画面，等待yolomedia发送处理后的帧
-                    if current_state == "ITEM_SEARCH":
-                        # 找物品模式下，如果yolomedia还没开始发送帧，先显示原始画面
-                        if not yolomedia_sending_frames and camera_viewers:
-                            ok, enc = cv2.imencode(
-                                ".jpg", bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 80]
-                            )
-                            if ok:
-                                jpeg_data = enc.tobytes()
-                                dead = []
-                                for viewer_ws in list(camera_viewers):
-                                    try:
-                                        await viewer_ws.send_bytes(jpeg_data)
-                                    except Exception:
-                                        dead.append(viewer_ws)
-                                for d in dead:
-                                    camera_viewers.discard(d)
-                        continue  # 跳过后续的导航处理
 
                     out_img = bgr
                     try:
@@ -1233,8 +1013,8 @@ async def ws_camera_esp(ws: WebSocket):
                     # 已托管，进入下一帧
                     continue
 
-                # 【回退】寻物占用或者未解码成功，按原始画面回传
-                if not yolomedia_sending_frames and camera_viewers:
+                # 【回退】未托管或者未解码成功，按原始画面回传
+                if camera_viewers:
                     try:
                         if bgr is None:
                             arr = np.frombuffer(data, dtype=np.uint8)
@@ -1273,7 +1053,6 @@ async def ws_camera_esp(ws: WebSocket):
             pass
         owns_ws = esp32_camera_ws is ws
         if owns_ws:
-            stop_yolomedia()
             esp32_camera_ws = None
             camera_connected_at = 0.0
             camera_last_frame_at = 0.0
@@ -1535,12 +1314,6 @@ async def on_startup_register_bridge_sender():
             if main_loop.is_closed():
                 return
 
-            # 标记YOLO已经开始发送处理后的帧
-            global yolomedia_sending_frames
-            if not yolomedia_sending_frames:
-                yolomedia_sending_frames = True
-                print("[YOLOMEDIA] 开始发送处理后的帧，切换到YOLO画面", flush=True)
-
             async def _broadcast():
                 if not camera_viewers:
                     return
@@ -1642,9 +1415,6 @@ async def on_startup():
     await hard_reset_audio("startup_preflight")
 
     if not sanitize_audio_system_state():
-        startup_state_ok = False
-
-    if not stop_yolomedia():
         startup_state_ok = False
 
     bridge_io.clear_frames()
@@ -1865,9 +1635,6 @@ async def on_shutdown():
             else:
                 imu_ws_clients.discard(ws)
 
-        if not stop_yolomedia():
-            retry_ok = False
-
         await hard_reset_audio("shutdown_retry")
         if shutdown_audio_system() is False:
             retry_ok = False
@@ -1965,10 +1732,6 @@ async def on_shutdown():
             shutdown_ok = False
         else:
             imu_ws_clients.discard(ws)
-
-    # 停止YOLO媒体处理
-    if not stop_yolomedia():
-        shutdown_ok = False
 
     bridge_io.set_sender(None)
     bridge_io.clear_frames()

@@ -51,13 +51,6 @@
   - 红绿灯颜色识别
   - 对齐引导系统
   - 安全提醒
-
-- 🔍 物品识别与查找
-  - YOLO-E 开放词汇检测
-  - MediaPipe 手部引导
-  - 实时目标追踪
-  - 抓取动作检测
-
 - 🎙️ 实时语音交互
   - 阿里云 Paraformer ASR
   - 智能指令解析
@@ -78,7 +71,6 @@
 ### 技术栈
 - FastAPI + WebSocket
 - YOLO11 / YOLO-E
-- MediaPipe
 - PyTorch + CUDA
 - OpenCV
 - DashScope API

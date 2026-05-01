@@ -6,14 +6,6 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# 物品名称映射
-ITEM_TO_CLASS_MAP = {
-    "红牛": "Red_Bull",
-    "AD钙奶": "AD_milk",
-    "ad钙奶": "AD_milk",
-    "钙奶": "AD_milk",
-}
-
 # 英文类别名到中文的映射
 _OBSTACLE_NAME_CN = {
     'person': '人',
@@ -30,19 +22,6 @@ _OBSTACLE_NAME_CN = {
 
 # 动态类别名称列表
 DYNAMIC_CLASS_NAMES = {'person', 'bicycle', 'car', 'motorcycle', 'bus', 'truck', 'animal', 'dog'}
-
-def extract_english_label(item_cn: str) -> tuple:
-    """
-    提取中文物品名称对应的英文标签
-    :param item_cn: 中文物品名称
-    :return: (英文标签, 来源)
-    """
-    # 先查找本地映射
-    if item_cn in ITEM_TO_CLASS_MAP:
-        return ITEM_TO_CLASS_MAP[item_cn], "local"
-    
-    # 如果没有找到，返回原始名称
-    return item_cn, "direct"
 
 def _to_cn_obstacle(name: str) -> str:
     """

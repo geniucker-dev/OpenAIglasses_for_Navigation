@@ -8,10 +8,8 @@
 
 ```
 static/
-├── main.js           # 主入口：WebSocket连接、UI更新
-├── vision.js         # 视频流：JPEG帧接收、Canvas渲染
+├── main.js           # 主入口：WebSocket连接、UI更新、视频Canvas渲染
 ├── visualizer.js     # IMU 3D：Three.js姿态渲染
-├── vision_renderer.js # 渲染器工具
 ├── vision.css        # 样式
 └── models/           # 3D模型文件（IMU可视化）
 ```
@@ -20,8 +18,7 @@ static/
 
 | 任务 | 文件 |
 |------|------|
-| WebSocket连接 | `main.js` |
-| 视频流渲染 | `vision.js` |
+| WebSocket连接/视频渲染 | `main.js` |
 | IMU 3D可视化 | `visualizer.js` |
 | 样式修改 | `vision.css` |
 | 调试输入框/按钮 | `main.js` + `templates/index.html` |
@@ -50,7 +47,7 @@ static/
 ## DEBUG INPUT
 
 - Web 监控页提供调试输入框，可直接向后端 `/api/debug_text` 发送文本指令，绕过 ASR 便于调试状态机。
-- 适合验证 `开始过马路`、`停止导航`、`帮我找一下红牛` 这类指令，而不必等待语音识别链路。
+- 适合验证 `开始过马路`、`停止导航` 这类指令，而不必等待语音识别链路。
 
 ## MOBILE LAYOUT
 

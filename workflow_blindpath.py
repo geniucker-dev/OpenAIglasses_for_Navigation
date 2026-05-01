@@ -992,7 +992,7 @@ class BlindPathNavigator:
     def _predict_mask_with_flow(self, prev_mask, prev_gray, curr_gray):
         """使用Lucas-Kanade光流预测掩码位置（改进版）"""
         try:
-            # 方法1：尝试使用凸包方法（参考yolomedia）
+            # 使用凸包方法根据光流特征点预测掩码位置
             if hasattr(self, 'flow_points') and 'blind_path' in self.flow_points:
                 p0 = self.flow_points['blind_path']
                 if p0 is not None and len(p0) >= 5:

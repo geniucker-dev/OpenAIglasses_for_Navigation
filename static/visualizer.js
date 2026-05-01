@@ -333,7 +333,7 @@ class TechVisualizer {
         ctx.lineWidth = 2;
         ctx.globalAlpha = 0.8;
         
-        // MediaPipe手部连接定义
+        // 手部连接定义
         const connections = [
             [0, 1], [1, 2], [2, 3], [3, 4],  // 拇指
             [0, 5], [5, 6], [6, 7], [7, 8],  // 食指

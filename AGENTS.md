@@ -8,17 +8,16 @@
 
 ## OVERVIEW
 
-视障人士智能导航辅助系统。FastAPI后端 + YOLO分割 + MediaPipe手部检测 + 阿里云DashScope语音交互。Python 3.11。
+视障人士智能导航辅助系统。FastAPI后端 + YOLO分割 + 阿里云DashScope语音交互。Python 3.11。
 
 ## STRUCTURE
 
 ```
 ./
 ├── app_main.py              # 主入口：FastAPI + WebSocket路由
-├── navigation_master.py     # 导航状态机（IDLE/CHAT/BLINDPATH/CROSSING/ITEM_SEARCH）
+├── navigation_master.py     # 导航状态机（IDLE/CHAT/BLINDPATH/CROSSING）
 ├── workflow_blindpath.py    # 盲道导航：YOLO分割 + 光流稳定 + 避障
 ├── workflow_crossstreet.py  # 过马路：斑马线检测 + 红绿灯识别
-├── yolomedia.py             # 物品查找：YOLO-E开放词汇 + MediaPipe手部追踪
 ├── yoloe_backend.py         # YOLO-E 后端：开放词汇检测封装（MPS float64守卫）
 ├── obstacle_detector_client.py # 障碍物检测客户端（MPS float64守卫 + bf16善后）
 ├── trafficlight_detection.py # 红绿灯YOLO检测
@@ -31,15 +30,12 @@
 ├── sync_recorder.py         # 音视频同步录制
 ├── device_utils.py          # 设备选择 (CUDA/ROCm/MPS/CPU) + AMP + GPU并发限流
 ├── crosswalk_awareness.py   # 斑马线感知
-├── qwen_extractor.py        # Qwen标签提取
 ├── utils.py                 # 通用工具函数
 ├── templates/
 │   └── index.html           # Web监控界面（含滚动聊天面板）
 ├── static/                  # 前端JS/CSS（Web监控界面）
 │   ├── main.js              # 前端主逻辑
-│   ├── vision.js            # 视频流渲染
 │   ├── visualizer.js        # IMU 3D可视化
-│   ├── vision_renderer.js   # 渲染器工具
 │   ├── vision.css           # 样式
 │   └── AGENTS.md            # 前端补充文档
 ├── compile/                 # ESP32固件（PlatformIO项目）
@@ -60,7 +56,6 @@
 | 导航状态切换 | `navigation_master.py` | `NavigationMaster.process_frame()` |
 | 盲道检测逻辑 | `workflow_blindpath.py` | `BlindPathNavigator.process_frame()` |
 | 过马路逻辑 | `workflow_crossstreet.py` | `CrossStreetNavigator` |
-| 物品查找逻辑 | `yolomedia.py` | `main()`, `YOLOEBackend` |
 | ASR集成 | `asr_core.py` | `ASRCallback` |
 | 音频播放 | `audio_player.py` | `play_voice_text()` |
 | 前端界面 | `templates/index.html` → `static/main.js` | - |
@@ -112,14 +107,12 @@
 ### 模型路径
 - 必须存放在 `./model/`:
   - `yolo-seg.pt` (盲道分割)
-  - `yoloe-11l-seg.pt` (开放词汇检测)
-  - `shoppingbest5.pt` (物品识别)
+  - `yoloe-11l-seg.pt` (开放词汇障碍物检测)
   - `trafficlight.pt` (红绿灯)
-  - `hand_landmarker.task` (MediaPipe手部)
 - 环境变量可覆盖: `BLIND_PATH_MODEL`, `YOLOE_MODEL_PATH`, `OBSTACLE_MODEL`
 
 ### 环境变量
-- **必需**: `DASHSCOPE_API_KEY` (阿里云ASR/Qwen)
+- **必需**: `DASHSCOPE_API_KEY` (阿里云ASR)
 - 可选调参: `AIGLASS_MASK_MIN_AREA`, `AIGLASS_PANEL_SCALE`, `AIGLASS_DEVICE`
 - 可选AMP: `AIGLASS_AMP` (auto/bf16/fp16/off，默认auto)
 - 可选GPU并发: `AIGLASS_GPU_SLOTS` (默认2)
@@ -145,7 +138,7 @@
 ## UNIQUE STYLES
 
 ### 状态机设计
-- `NavigationMaster` 维护全局状态: `IDLE` → `CHAT` / `BLINDPATH_NAV` / `CROSSING` / `TRAFFIC_LIGHT_DETECTION` / `ITEM_SEARCH`
+- `NavigationMaster` 维护全局状态: `IDLE` → `CHAT` / `BLINDPATH_NAV` / `CROSSING` / `TRAFFIC_LIGHT_DETECTION`
 - 每个模式有独立 `workflow_*.py` 实现类
 
 ### 光流稳定

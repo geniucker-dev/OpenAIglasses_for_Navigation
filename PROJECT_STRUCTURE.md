@@ -10,7 +10,6 @@
 ├── navigation_master.py        # 导航状态机
 ├── workflow_blindpath.py       # 盲道导航
 ├── workflow_crossstreet.py     # 过马路导航
-├── yolomedia.py                # 物品查找 / 处理后画面发送
 ├── yoloe_backend.py            # YOLO-E 开放词汇检测后端（MPS float64守卫）
 ├── obstacle_detector_client.py # 障碍物检测客户端（MPS float64守卫 + bf16善后）
 ├── trafficlight_detection.py   # 红绿灯 YOLO 检测
@@ -23,15 +22,12 @@
 ├── sync_recorder.py            # 音视频同步录制
 ├── device_utils.py             # CUDA / ROCm / MPS / CPU 自动选择 + AMP + GPU并发限流
 ├── crosswalk_awareness.py      # 斑马线感知
-├── qwen_extractor.py           # Qwen 标签提取
 ├── utils.py                    # 通用工具函数
 ├── templates/
 │   └── index.html              # Web 监控界面（含滚动聊天面板）
 ├── static/
-│   ├── main.js                 # 前端主逻辑：视频、状态、重连、聊天面板
-│   ├── vision.js               # 视觉相关前端工具
+│   ├── main.js                 # 前端主逻辑：视频、状态、重连、消息面板
 │   ├── visualizer.js           # IMU 3D 可视化
-│   ├── vision_renderer.js      # 渲染器工具
 │   ├── vision.css              # 样式
 │   └── AGENTS.md               # 前端补充文档
 ├── compile/
@@ -71,7 +67,7 @@ ESP32 Camera
   → [JPEG] WebSocket /ws/camera
   → app_main.py
   → bridge_io.push_raw_jpeg()
-  → 导航 / yolomedia 处理
+  → 导航处理
   → [JPEG] WebSocket /ws/viewer
   → Browser Canvas
 ```
@@ -83,7 +79,7 @@ ESP32 Mic
   → [PCM16, 16kHz, mono, 20ms] WebSocket /ws_audio
   → app_main.py
   → DashScope ASR
-  → 文本结果 / 导航控制 / 找物品指令
+  → 文本结果 / 导航控制
 ```
 
 ### 音频下行

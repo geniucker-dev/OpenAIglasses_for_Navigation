@@ -109,7 +109,7 @@ echo -e "${GREEN}✓ 目录结构已创建${NC}"
 # 检查模型文件
 echo ""
 echo "正在检查模型文件..."
-MODELS=("yolo-seg.pt" "yoloe-11l-seg.pt" "shoppingbest5.pt" "trafficlight.pt" "hand_landmarker.task")
+MODELS=("yolo-seg.pt" "yoloe-11l-seg.pt" "trafficlight.pt")
 MISSING_MODELS=()
 
 for model in "${MODELS[@]}"; do

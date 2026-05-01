@@ -24,7 +24,6 @@ SEEKING_NEXT_BLINDPATH = (
 )
 RECOVERY = "RECOVERY"  # 兜底/恢复（感知暂时丢失时）
 TRAFFIC_LIGHT_DETECTION = "TRAFFIC_LIGHT_DETECTION"  # 红绿灯检测模式
-ITEM_SEARCH = "ITEM_SEARCH"  # 找物品模式（暂停导航，由yolomedia处理画面）
 
 
 # ========== 返回结构 ==========
@@ -357,9 +356,6 @@ class NavigationMaster:
 
         self.COOLDOWN_SEC = 0.6
 
-        # 找物品状态管理
-        self.prev_nav_state_before_search = None  # 找物品前的导航状态，用于恢复
-
     # ----- 外部交互 -----
     def get_state(self) -> str:
         return self.state
@@ -396,40 +392,7 @@ class NavigationMaster:
             "CHAT",
             "IDLE",
             "TRAFFIC_LIGHT_DETECTION",
-            "ITEM_SEARCH",
         ]
-
-    def start_item_search(self):
-        """启动找物品模式，暂停当前导航"""
-        # 保存当前导航状态（如果在导航中）
-        if self.state in [
-            BLINDPATH_NAV,
-            SEEKING_CROSSWALK,
-            WAIT_TRAFFIC_LIGHT,
-            CROSSING,
-            SEEKING_NEXT_BLINDPATH,
-        ]:
-            self.prev_nav_state_before_search = self.state
-            print(f"[NAV MASTER] 暂停导航状态 {self.state}，切换到找物品模式")
-        else:
-            self.prev_nav_state_before_search = None
-
-        self.state = ITEM_SEARCH
-        self.cooldown_until = time.time() + self.COOLDOWN_SEC
-
-    def stop_item_search(self, restore_nav: bool = True):
-        """停止找物品模式"""
-        # 如果需要恢复之前的导航状态
-        if restore_nav and self.prev_nav_state_before_search:
-            self.state = self.prev_nav_state_before_search
-            print(f"[NAV MASTER] 找物品结束，恢复到导航状态 {self.state}")
-            self.prev_nav_state_before_search = None
-        else:
-            # 否则回到待机模式
-            self.state = CHAT
-            print(f"[NAV MASTER] 找物品结束，回到待机模式")
-
-        self.cooldown_until = time.time() + self.COOLDOWN_SEC
 
     def force_state(self, s: str):
         self.state = s
@@ -479,7 +442,6 @@ class NavigationMaster:
 
     def reset_for_camera_reconnect(self):
         preserved_state = self.state
-        preserved_prev_nav_state = self.prev_nav_state_before_search
         preserved_prev_target_state = self.prev_target_state
         self.cnt_crosswalk_seen = 0
         self.cnt_align_ready = 0
@@ -499,7 +461,6 @@ class NavigationMaster:
         except Exception:
             pass
         self.state = preserved_state
-        self.prev_nav_state_before_search = preserved_prev_nav_state
         self.prev_target_state = preserved_prev_target_state
 
     # ----- 内部工具 -----
@@ -573,18 +534,6 @@ class NavigationMaster:
                 guidance_text="",
                 state="TRAFFIC_LIGHT_DETECTION",
                 extras={"mode": "红绿灯检测模式"},
-            )
-
-        # 【新增】找物品模式：只返回原始画面，由yolomedia处理
-        if self.state == ITEM_SEARCH:
-            return OrchestratorResult(
-                annotated_image=bgr,
-                guidance_text="",
-                state="ITEM_SEARCH",
-                extras={
-                    "mode": "找物品模式",
-                    "prev_nav_state": self.prev_nav_state_before_search,
-                },
             )
 
         # 冷却期内允许继续输出画面，但避免"瞬时切换"
