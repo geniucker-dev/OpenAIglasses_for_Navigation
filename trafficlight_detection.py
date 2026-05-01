@@ -14,12 +14,12 @@ from ultralytics import YOLO
 import bridge_io
 from audio_player import play_voice_text  # 使用统一的语音播放接口
 import logging
-from device_utils import DEVICE
+from ncnn_runtime import assert_frame_shape, assert_ncnn_model_path, get_infer_device, predict_kwargs
 
 logger = logging.getLogger(__name__)
 
 # ========= 配置参数 =========
-YOLO_MODEL_PATH = os.getenv("TRAFFIC_LIGHT_MODEL", "model/trafficlight.pt")
+YOLO_MODEL_PATH = os.getenv("TRAFFIC_LIGHT_MODEL", "model/trafficlight_ncnn_model")
 
 # ========= 显示参数 =========
 CONF_THRESHOLD = 0.25  # 置信度阈值
@@ -223,14 +223,14 @@ def main(headless: bool = True, stop_event=None):
         stop_event: threading.Event，用于停止检测
     """
 
-    print("[TRAFFIC] 加载 YOLO 红绿灯检测模型...")
+    print("[TRAFFIC] 加载 YOLO 红绿灯 NCNN 模型...")
     try:
-        model = YOLO(YOLO_MODEL_PATH)
-        model.to(DEVICE)
-        print(f"[TRAFFIC] 模型加载成功: {YOLO_MODEL_PATH}, 设备: {DEVICE}")
+        assert_ncnn_model_path(YOLO_MODEL_PATH, "红绿灯检测模型")
+        model = YOLO(YOLO_MODEL_PATH, task="detect")
+        print(f"[TRAFFIC] 模型加载成功: {YOLO_MODEL_PATH}, 设备: {get_infer_device()}")
     except Exception as e:
         print(f"[TRAFFIC] 模型加载失败: {e}")
-        return
+        raise
 
     # 获取类别名称
     class_names = model.names if hasattr(model, "names") else {}
@@ -283,6 +283,7 @@ def main(headless: bool = True, stop_event=None):
 
             frame_received_count += 1
 
+            assert_frame_shape(frame, "trafficlight frame")
             # 重置UI叠加
             H, W = frame.shape[:2]
             ui_reset_overlay(H)
@@ -292,7 +293,7 @@ def main(headless: bool = True, stop_event=None):
 
             # 【优化】YOLO推理 - 添加计时
             inference_start = time.time()
-            results = model(frame, conf=CONF_THRESHOLD, verbose=False)
+            results = model(frame, **predict_kwargs(conf=CONF_THRESHOLD))
             inference_time = (time.time() - inference_start) * 1000
 
             # 监控推理时间
@@ -545,10 +546,10 @@ def init_model():
         return True
 
     try:
-        print("[TRAFFIC] 加载 YOLO 红绿灯检测模型...")
-        _model = YOLO(YOLO_MODEL_PATH)
-        _model.to(DEVICE)
-        print(f"[TRAFFIC] 模型加载成功: {YOLO_MODEL_PATH}, 设备: {DEVICE}")
+        print("[TRAFFIC] 加载 YOLO 红绿灯 NCNN 模型...")
+        assert_ncnn_model_path(YOLO_MODEL_PATH, "红绿灯检测模型")
+        _model = YOLO(YOLO_MODEL_PATH, task="detect")
+        print(f"[TRAFFIC] 模型加载成功: {YOLO_MODEL_PATH}, 设备: {get_infer_device()}")
         class_names = _model.names if hasattr(_model, "names") else {}
         print(f"[TRAFFIC] 模型类别: {class_names}")
         return True
@@ -570,13 +571,14 @@ def process_single_frame(image: np.ndarray, ui_broadcast_callback=None) -> dict:
 
     if _model is None:
         if not init_model():
-            return {"vis_image": image, "detected_light": None, "stable_light": None}
+            raise RuntimeError("红绿灯 NCNN 模型初始化失败")
 
     vis = image.copy()
     t_now = time.time()
 
     # YOLO推理
-    results = _model(image, conf=CONF_THRESHOLD, verbose=False)
+    assert_frame_shape(image, "trafficlight frame")
+    results = _model(image, **predict_kwargs(conf=CONF_THRESHOLD))
 
     # 处理检测结果
     detected_light = None

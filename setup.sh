@@ -110,25 +110,45 @@ echo -e "${GREEN}✓ 目录结构已创建${NC}"
 echo ""
 echo "正在检查模型文件..."
 MODELS=("yolo-seg.pt" "yoloe-11l-seg.pt" "trafficlight.pt")
+NCNN_MODELS=("yolo-seg_ncnn_model" "yoloe-11l-seg_ncnn_model" "trafficlight_ncnn_model")
 MISSING_MODELS=()
+MISSING_NCNN=()
 
 for model in "${MODELS[@]}"; do
     if [ -f "model/$model" ]; then
         echo -e "${GREEN}✓ $model${NC}"
     else
-        echo -e "${RED}✗ $model (缺失)${NC}"
+        echo -e "${RED}✗ $model (缺失，导出 NCNN 需要)${NC}"
         MISSING_MODELS+=("$model")
+    fi
+done
+
+for model_dir in "${NCNN_MODELS[@]}"; do
+    if [ -d "model/$model_dir" ]; then
+        echo -e "${GREEN}✓ $model_dir${NC}"
+    else
+        echo -e "${RED}✗ $model_dir (缺失，运行时必需)${NC}"
+        MISSING_NCNN+=("$model_dir")
     fi
 done
 
 if [ ${#MISSING_MODELS[@]} -gt 0 ]; then
     echo ""
-    echo -e "${YELLOW}警告: 缺少以下模型文件:${NC}"
+    echo -e "${YELLOW}警告: 缺少以下 .pt 源模型文件:${NC}"
     for model in "${MISSING_MODELS[@]}"; do
         echo "  - $model"
     done
     echo "请从以下地址下载并放入 model/ 目录:"
     echo "  https://www.modelscope.cn/models/archifancy/AIGlasses_for_navigation"
+fi
+
+if [ ${#MISSING_NCNN[@]} -gt 0 ]; then
+    echo ""
+    echo -e "${YELLOW}警告: 缺少运行时 NCNN 模型目录:${NC}"
+    for model_dir in "${MISSING_NCNN[@]}"; do
+        echo "  - $model_dir"
+    done
+    echo "下载 .pt 后执行: uv run python scripts/export_ncnn_models.py"
 fi
 
 # 完成
@@ -141,7 +161,8 @@ echo "下一步:"
 echo "1. 编辑 .env 文件，填入您的 API 密钥:"
 echo "   nano .env"
 echo ""
-echo "2. 确保所有模型文件已放入 model/ 目录"
+echo "2. 确保 .pt 源模型已放入 model/ 目录，并导出 NCNN 模型:"
+echo "   uv run python scripts/export_ncnn_models.py"
 echo ""
 echo "3. 启动系统:"
 echo "   uv run python app_main.py"

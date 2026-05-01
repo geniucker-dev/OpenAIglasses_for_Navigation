@@ -476,6 +476,9 @@
       const text = $debugText.value.trim();
       if (!text) return;
 
+      $debugText.value = '';
+      $btnDebugSend.disabled = true;
+
       try {
         const resp = await fetch('/api/debug_text', {
           method: 'POST',
@@ -483,11 +486,15 @@
           body: JSON.stringify({text})
         });
         const data = await resp.json();
-        if (data.success) {
-          $debugText.value = '';
+        if (!data.success) {
+          $debugText.value = text;
         }
       } catch (e) {
+        $debugText.value = text;
         console.error('Debug send failed:', e);
+      } finally {
+        $btnDebugSend.disabled = false;
+        $debugText.focus();
       }
     };
 

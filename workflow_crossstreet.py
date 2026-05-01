@@ -8,7 +8,6 @@
 - 每帧都进行分割；若该帧分割失败，则用上一帧从掩码打点的光流特征点追踪，重建掩码保持位置，直到下一次分割检出
 """
 
-import torch
 import os
 import time
 import logging
@@ -16,7 +15,7 @@ import numpy as np
 import cv2
 from dataclasses import dataclass
 from typing import Optional, List, Dict, Any
-from device_utils import DEVICE, to_device
+from ncnn_runtime import assert_frame_shape, predict_kwargs, tensor_like_scalar, tensor_like_to_numpy
 # 【移除】from audio_player import play_voice_text - 不在工作流内部播放音频
 
 # 可选：用于更精致的数据面板（与 blindpath 一致）
@@ -349,7 +348,8 @@ class CrossStreetNavigator:
             try:
                 if ObstacleDetectorClient is not None:
                     model_path = os.getenv(
-                        "AIGLASS_OBS_MODEL", "model/yoloe-11l-seg.pt"
+                        "AIGLASS_OBS_MODEL",
+                        os.getenv("OBSTACLE_MODEL", "model/yoloe-11l-seg_ncnn_model"),
                     )
                     self.obstacle_detector = ObstacleDetectorClient(model_path)
                     logger.info("[CROSS_STREET] 障碍物检测器已自动加载")
@@ -372,17 +372,6 @@ class CrossStreetNavigator:
         logger.info(
             f"[CROSS_STREET] 斑马线检测间隔: 每{self.CROSSWALK_DETECTION_INTERVAL}帧"
         )
-
-        if self.seg_model:
-            try:
-                to_device(
-                    self.seg_model.model
-                    if hasattr(self.seg_model, "model")
-                    else self.seg_model
-                )
-                logger.info(f"[CROSS_STREET] 模型已移至 {DEVICE}")
-            except Exception as e:
-                logger.warning(f"[CROSS_STREET] 无法将模型移至设备: {e}")
 
     def reset(self):
         """重置状态"""
@@ -2280,8 +2269,9 @@ class YOLOModelWrapper:
     def detect(self, image, confidence_threshold=0.25):
         """使用 predict 方法并转换为 detect 格式"""
         try:
+            assert_frame_shape(image, "crosswalk frame")
             results = self.model.predict(
-                image, conf=confidence_threshold, verbose=False, device=DEVICE
+                image, **predict_kwargs(conf=confidence_threshold)
             )
             detections = []
             if results and len(results) > 0:
@@ -2289,14 +2279,14 @@ class YOLOModelWrapper:
                 if hasattr(result, "masks") and result.masks is not None:
                     for i, mask in enumerate(result.masks.data):
                         if hasattr(result, "boxes") and result.boxes is not None:
-                            cls = int(result.boxes.cls[i].cpu().numpy())
-                            conf = float(result.boxes.conf[i].cpu().numpy())
+                            cls = int(tensor_like_scalar(result.boxes.cls[i]))
+                            conf = float(tensor_like_scalar(result.boxes.conf[i]))
 
                             class Detection:
                                 def __init__(self):
                                     self.cls = cls
                                     self.conf = conf
-                                    self.mask = mask.cpu().numpy()
+                                    self.mask = tensor_like_to_numpy(mask)
 
                             detections.append(Detection())
             return detections

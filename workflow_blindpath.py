@@ -12,10 +12,10 @@ import logging
 from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass
 from collections import deque
-import torch  # 添加这行
 from obstacle_detector_client import ObstacleDetectorClient
 from audio_player import play_voice_text  # 新增
 from crosswalk_awareness import CrosswalkAwarenessMonitor, split_combined_voice  # 斑马线感知
+from ncnn_runtime import assert_frame_shape, predict_kwargs, tensor_like_to_numpy
 # 尝试导入 Pillow，用于中文显示
 try:
     from PIL import Image, ImageDraw, ImageFont
@@ -288,7 +288,9 @@ class BlindPathNavigator:
         # 如果有 YOLO 模型，优先使用
         if self.traffic_light_yolo:
             try:
-                results = self.traffic_light_yolo.predict(image, verbose=False, conf=0.3)
+                results = self.traffic_light_yolo.predict(
+                    image, **predict_kwargs(conf=0.3)
+                )
                 # TODO: 解析 YOLO 结果，判断红绿灯颜色
                 pass
             except:
@@ -783,23 +785,17 @@ class BlindPathNavigator:
     def _detect_path_and_crosswalk(self, image: np.ndarray) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
         """检测盲道和斑马线"""
         if self.yolo_model is None:
-            # 【新增】没有模型时返回模拟数据用于测试
-            logger.warning("YOLO模型未加载，返回模拟数据")
-            h, w = image.shape[:2]
-            # 创建一个模拟的盲道掩码（垂直居中的条带）
-            blind_path_mask = np.zeros((h, w), dtype=np.uint8)
-            # 在图像中央创建一个宽度为图像宽度20%的垂直条带
-            strip_width = int(w * 0.2)
-            strip_left = (w - strip_width) // 2
-            blind_path_mask[int(h*0.3):, strip_left:strip_left+strip_width] = 255
-            return blind_path_mask, None
+            raise RuntimeError("盲道 NCNN 模型未加载")
         
         blind_path_mask = None
         crosswalk_mask = None
         
         try:
+            assert_frame_shape(image, "blindpath frame")
             min_conf = min(self.CLASS_CONF_THRESHOLDS.values())
-            results = self.yolo_model.predict(image, verbose=False, conf=min_conf, classes=[0, 1])
+            results = self.yolo_model.predict(
+                image, **predict_kwargs(conf=min_conf, classes=[0, 1])
+            )
             
             if (results and results[0] and results[0].masks is not None and 
                 results[0].boxes is not None and len(results[0].masks.data) > 0):
@@ -825,38 +821,25 @@ class BlindPathNavigator:
                             else:
                                 crosswalk_mask = cv2.bitwise_or(crosswalk_mask, current_mask)
         except Exception as e:
-            logger.error(f"YOLO检测失败: {e}")
-            # 【新增】检测失败时也返回模拟数据
-            h, w = image.shape[:2]
-            blind_path_mask = np.zeros((h, w), dtype=np.uint8)
-            strip_width = int(w * 0.2)
-            strip_left = (w - strip_width) // 2
-            blind_path_mask[int(h*0.3):, strip_left:strip_left+strip_width] = 255
+            logger.error(f"NCNN 盲道/斑马线检测失败: {e}")
+            raise
         
         return blind_path_mask, crosswalk_mask
     
     def _tensor_to_mask(self, mask_tensor, out_w: int, out_h: int, binarize: bool = True) -> np.ndarray:
-        """将张量掩码转换为numpy数组"""
+        """将 NCNN/Ultralytics 掩码转换为 numpy 数组"""
         try:
-            import torch
-            
-            if not isinstance(mask_tensor, torch.Tensor):
-                arr = np.asarray(mask_tensor)
-                if arr.dtype != np.uint8:
-                    arr = (arr > 0.5).astype(np.uint8) * 255 if binarize else (arr * 255.0).astype(np.uint8)
-                mask_u8 = arr
-            else:
-                if mask_tensor.dtype in (torch.bfloat16, torch.float16):
-                    mask_tensor = mask_tensor.to(torch.float32)
-                
-                if mask_tensor.ndim > 2:
-                    mask_tensor = mask_tensor.squeeze()
-                
-                if binarize:
-                    mask_tensor = (mask_tensor > 0.5).to(torch.uint8).mul_(255)
-                    mask_u8 = mask_tensor.cpu().numpy()
+            arr = tensor_like_to_numpy(mask_tensor)
+            if arr.ndim > 2:
+                arr = np.squeeze(arr)
+
+            if binarize:
+                if arr.max() <= 1.0:
+                    mask_u8 = (arr > 0.5).astype(np.uint8) * 255
                 else:
-                    mask_u8 = (mask_tensor.mul(255).clamp_(0, 255).to(torch.uint8)).cpu().numpy()
+                    mask_u8 = (arr > 0).astype(np.uint8) * 255
+            else:
+                mask_u8 = np.clip(arr * 255.0 if arr.max() <= 1.0 else arr, 0, 255).astype(np.uint8)
             
             if mask_u8.ndim == 3:
                 mask_u8 = mask_u8.squeeze(-1)
@@ -865,9 +848,9 @@ class BlindPathNavigator:
                 mask_u8 = cv2.resize(mask_u8, (out_w, out_h), interpolation=cv2.INTER_NEAREST)
             
             return mask_u8
-        except ImportError:
-            # 如果没有torch，返回空掩码
-            return np.zeros((out_h, out_w), dtype=np.uint8)
+        except Exception as e:
+            logger.error(f"掩码转换失败: {e}")
+            raise
     
     def _stabilize_mask(self, prev_gray, curr_gray, raw_mask, prev_stable_mask, mask_type):
         """稳定化掩码 - 使用 Lucas-Kanade 光流"""

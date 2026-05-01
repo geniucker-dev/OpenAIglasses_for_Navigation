@@ -18,6 +18,8 @@ dependencies = [
     "pygame==2.5.2",
     "dashscope==1.14.1",
     "python-dotenv>=1.0.0",
+    "ncnn>=1.0.20260114",
+    "pnnx>=20260409",
 ]
 
 [dependency-groups]

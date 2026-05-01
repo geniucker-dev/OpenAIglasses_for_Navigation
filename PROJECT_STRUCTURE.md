@@ -10,9 +10,9 @@
 ├── navigation_master.py        # 导航状态机
 ├── workflow_blindpath.py       # 盲道导航
 ├── workflow_crossstreet.py     # 过马路导航
-├── yoloe_backend.py            # YOLO-E 开放词汇检测后端（MPS float64守卫）
-├── obstacle_detector_client.py # 障碍物检测客户端（MPS float64守卫 + bf16善后）
-├── trafficlight_detection.py   # 红绿灯 YOLO 检测
+├── yoloe_backend.py            # NCNN-only YOLOE 兼容后端
+├── obstacle_detector_client.py # NCNN/Vulkan 白名单障碍物检测客户端
+├── trafficlight_detection.py   # NCNN/Vulkan 红绿灯 YOLO 检测
 ├── models.py                   # 模型加载统一入口
 ├── asr_core.py                 # DashScope 实时 ASR 回调
 ├── audio_player.py             # 多路音频播放
@@ -20,7 +20,8 @@
 ├── audio_stream.py             # /stream.wav HTTP 音频流
 ├── bridge_io.py                # 原始/处理后画面桥接
 ├── sync_recorder.py            # 音视频同步录制
-├── device_utils.py             # CUDA / ROCm / MPS / CPU 自动选择 + AMP + GPU并发限流
+├── ncnn_runtime.py             # NCNN/Vulkan 运行时配置、路径校验和输出转换
+├── device_utils.py             # PyTorch 设备工具（仅离线导出/非视觉辅助代码）
 ├── crosswalk_awareness.py      # 斑马线感知
 ├── utils.py                    # 通用工具函数
 ├── templates/
@@ -119,9 +120,7 @@ ESP32 IMU
 - camera 链路中，ESP32 侧连续发送失败 3 次会主动关闭 websocket 并重连。
 - audio 链路中，ESP32 侧重连或收到 `RESTART` 后会重新发送 `START`，因此服务端日志可能出现多次 `[AUDIO] START received`。
 - 当前仓库音频上行仍是 **裸 PCM**，**没有使用 Opus**。
-- 过马路分割与红绿灯 YOLO 路径都已显式接入 `device_utils.DEVICE`，在 Apple Silicon 上会优先尝试 MPS。
-- ROCm/AMD GPU 通过 `IS_ROCM` 自动检测，MIOpen 下不开启 `cudnn.benchmark`，避免 autotuning 卡顿。
-- AMP 自动混合精度：CUDA Ampere+ 默认 bf16，由 `gpu_infer_slot()` 统一管理。
+- 视觉推理运行时已统一为 **NCNN/Vulkan**：只加载 `*_ncnn_model/`，未显式配置时使用 `ncnn.get_default_gpu_index()` 自动选择 Vulkan 设备，不回退 PyTorch。
 - 相机 websocket 断线重连只重置瞬时计数器，不再把导航状态机强制打回默认状态。
 
 ## 🚀 启动与调试入口
@@ -130,11 +129,11 @@ ESP32 IMU
 
 ```bash
 uv sync
-uv pip install --torch-backend=auto torch torchvision ultralytics "clip @ git+https://github.com/ultralytics/CLIP.git"
+uv run python scripts/export_ncnn_models.py
 uv run python app_main.py
 ```
 
-说明：默认 `uv sync` 只同步核心依赖；`uv pip --torch-backend=auto` 用于单独安装 PyTorch / Ultralytics / CLIP 这条机器学习栈，避免后续同步把不同机器上的 CUDA / ROCm / CPU 变体覆盖回通用 wheel。macOS 上的 MPS 仍然是运行时自动选择。
+说明：`uv sync` 同步 NCNN 运行时依赖。PyTorch / Ultralytics / CLIP 仅在需要从 `.pt` 离线导出 `*_ncnn_model/` 时额外安装；视觉运行时不加载 `.pt`，也不做 PyTorch fallback。
 
 ### 固件
 

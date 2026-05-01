@@ -18,9 +18,9 @@
 ├── navigation_master.py     # 导航状态机（IDLE/CHAT/BLINDPATH/CROSSING）
 ├── workflow_blindpath.py    # 盲道导航：YOLO分割 + 光流稳定 + 避障
 ├── workflow_crossstreet.py  # 过马路：斑马线检测 + 红绿灯识别
-├── yoloe_backend.py         # YOLO-E 后端：开放词汇检测封装（MPS float64守卫）
-├── obstacle_detector_client.py # 障碍物检测客户端（MPS float64守卫 + bf16善后）
-├── trafficlight_detection.py # 红绿灯YOLO检测
+├── yoloe_backend.py         # NCNN-only YOLOE 兼容后端（运行时不支持文本提示词）
+├── obstacle_detector_client.py # NCNN/Vulkan 白名单障碍物检测客户端
+├── trafficlight_detection.py # NCNN/Vulkan 红绿灯YOLO检测
 ├── models.py                # 模型加载统一入口
 ├── asr_core.py              # 实时语音识别（DashScope Paraformer）
 ├── audio_player.py          # 多路音频混音播放
@@ -69,8 +69,8 @@
 | `BlindPathNavigator` | Class | workflow_blindpath.py:86 | 盲道导航核心 |
 | `TrafficLightDetector` | Class | navigation_master.py:69 | 红绿灯检测 |
 | `OrchestratorResult` | Class | navigation_master.py:32 | 导航结果封装 |
-| `YoloEBackend` | Class | yoloe_backend.py:18 | YOLO-E开放词汇检测后端 |
-| `ObstacleDetectorClient` | Class | obstacle_detector_client.py:16 | 障碍物检测客户端 |
+| `YoloEBackend` | Class | yoloe_backend.py:18 | NCNN-only YOLOE兼容后端 |
+| `ObstacleDetectorClient` | Class | obstacle_detector_client.py:16 | NCNN障碍物检测客户端 |
 | `load_navigation_models` | Func | app_main.py:137 | 模型加载入口 |
 | `handle_command_text` | Func | app_main.py:548 | 语音/调试文本指令处理 |
 | `ws_camera_esp` | Func | app_main.py:1120 | ESP32视频WebSocket |
@@ -97,7 +97,7 @@
 - 使用 `uv` 管理 Python 环境和依赖
 - Python 版本: `3.11`
 - 虚拟环境: `.venv/` (uv 自动创建)
-- PyTorch / Ultralytics / CLIP 安装推荐使用 `uv pip --torch-backend=auto ...` 单独安装，不要再放进默认 `uv sync` 依赖图里
+- PyTorch / Ultralytics / CLIP 仅用于从 `.pt` 离线导出 NCNN；运行时只需 `uv sync`，不要把导出工具链理解成运行时依赖
 
 ### 启动方式
 - **不用** `uvicorn module:app`，直接 `uv run python app_main.py`
@@ -105,26 +105,24 @@
 - IMU UDP端口: `12345`
 
 ### 模型路径
+- `.pt` 只用于离线导出，运行时视觉推理禁止加载 `.pt`。
 - 必须存放在 `./model/`:
-  - `yolo-seg.pt` (盲道分割)
-  - `yoloe-11l-seg.pt` (开放词汇障碍物检测)
-  - `trafficlight.pt` (红绿灯)
-- 环境变量可覆盖: `BLIND_PATH_MODEL`, `YOLOE_MODEL_PATH`, `OBSTACLE_MODEL`
+  - `yolo-seg.pt` → `yolo-seg_ncnn_model/` (盲道/斑马线分割)
+  - `yoloe-11l-seg.pt` → `yoloe-11l-seg_ncnn_model/` (白名单障碍物分割)
+  - `trafficlight.pt` → `trafficlight_ncnn_model/` (红绿灯)
+- 运行时环境变量默认值: `BLIND_PATH_MODEL=model/yolo-seg_ncnn_model`, `OBSTACLE_MODEL=model/yoloe-11l-seg_ncnn_model`, `TRAFFIC_LIGHT_MODEL=model/trafficlight_ncnn_model`, `YOLOE_MODEL_PATH=model/yoloe-11l-seg_ncnn_model`。
 
 ### 环境变量
 - **必需**: `DASHSCOPE_API_KEY` (阿里云ASR)
-- 可选调参: `AIGLASS_MASK_MIN_AREA`, `AIGLASS_PANEL_SCALE`, `AIGLASS_DEVICE`
-- 可选AMP: `AIGLASS_AMP` (auto/bf16/fp16/off，默认auto)
-- 可选GPU并发: `AIGLASS_GPU_SLOTS` (默认2)
+- NCNN/Vulkan: `AIGLASS_INFER_BACKEND=ncnn`, `AIGLASS_REQUIRE_NCNN=1`；`AIGLASS_NCNN_DEVICE` 可选，不设置时使用 `ncnn.get_default_gpu_index()` 自动选择
+- 相机尺寸: `AIGLASS_CAMERA_WIDTH=640`, `AIGLASS_CAMERA_HEIGHT=480`, `AIGLASS_NCNN_IMGSZ=480,640`
+- 可选调参: `AIGLASS_MASK_MIN_AREA`, `AIGLASS_PANEL_SCALE`
 
-### 设备选择 (CUDA > ROCm > MPS > CPU 自动 Fallback)
-- 系统自动选择最佳计算设备：CUDA (NVIDIA GPU) > ROCm (AMD GPU) > MPS (Apple Silicon) > CPU
-- 强制指定设备：设置环境变量 `AIGLASS_DEVICE=cuda` / `mps` / `cpu`
-- **ROCm (AMD GPU)**：通过 `IS_ROCM` 标识自动检测，ROCm 下不开启 `cudnn.benchmark`（MIOpen autotuning 比 NVIDIA cuDNN 慢几个数量级）
-- AMP 自动混合精度：CUDA 支持 bf16/fp16，MPS 支持 fp16
-- GPU 并发限流：`gpu_infer_slot()` 信号量控制，默认 2 槽位
-- 配置文件: `device_utils.py`
-- 这里描述的是**运行时设备选择**；PyTorch 的安装推荐交给 `uv pip --torch-backend=auto` 处理
+### 设备选择 (视觉运行时 NCNN/Vulkan)
+- 本地视觉推理运行时只走 Ultralytics NCNN runtime；未设置 `AIGLASS_NCNN_DEVICE` 时使用 `ncnn.get_default_gpu_index()`，也可用 `AIGLASS_NCNN_DEVICE=vulkan:N` 手动覆盖。
+- 不允许 PyTorch fallback；若 `_ncnn_model/` 缺失、路径配置为 `.pt`、Vulkan 推理失败或输出缺必要字段，直接报错。
+- `AIGLASS_DEVICE`、`device_utils.py` 的 CUDA/ROCm/MPS/CPU 逻辑仅保留给离线导出或非视觉辅助代码，不参与视觉运行时推理。
+- 后端不 resize ESP32 相机帧；默认按 `FRAMESIZE_VGA` 的 `(480, 640)` 导出和推理，分辨率变化必须重新导出 NCNN。
 
 ### 项目特定约定
 - 使用 `pyproject.toml` 管理依赖
@@ -152,9 +150,14 @@
 ## COMMANDS
 
 ```bash
-# 安装依赖
+# 安装运行时依赖
 uv sync
+
+# 仅在需要从 .pt 重新导出 NCNN 模型时安装导出工具链
 uv pip install --torch-backend=auto torch torchvision ultralytics "clip @ git+https://github.com/ultralytics/CLIP.git"
+
+# 导出 NCNN/Vulkan 运行时模型
+uv run python scripts/export_ncnn_models.py
 
 # 启动服务
 uv run python app_main.py
@@ -179,10 +182,11 @@ uv run python test_recorder.py
 
 ## NOTES
 
-- **PyTorch 安装推荐**: 先 `uv sync` 同步核心依赖，再用 `uv pip install --torch-backend=auto torch torchvision ultralytics "clip @ git+https://github.com/ultralytics/CLIP.git"` 安装机器学习栈；这样后续 `uv sync` 不会把 GPU / CPU 变体冲回通用 wheel
-- **GPU推荐**: Linux/Windows 若追求更高帧率推荐 CUDA 11.8+；macOS 使用 MPS 加速；无 GPU 时自动使用 CPU
+- **NCNN/Vulkan 运行时**: 视觉推理只加载 `*_ncnn_model/`；未设置 `AIGLASS_NCNN_DEVICE` 时使用 `ncnn.get_default_gpu_index()` 自动选择，也可手动设置 `AIGLASS_NCNN_DEVICE=vulkan:N`；不允许 PyTorch fallback。
+- **PyTorch / Ultralytics 安装**: 仅在需要从 `.pt` 重新导出 NCNN 模型时执行 `uv pip install --torch-backend=auto torch torchvision ultralytics "clip @ git+https://github.com/ultralytics/CLIP.git"`。
 - **Linux 音频构建依赖**: `pyaudio` 需要系统提供 `portaudio.h`；Ubuntu / Debian 可先安装 `portaudio19-dev` 与 `python3-dev`
 - 模型文件需从 ModelScope 下载: https://www.modelscope.cn/models/archifancy/AIGlasses_for_navigation
+- 下载 `.pt` 后执行 `uv run python scripts/export_ncnn_models.py` 生成运行时 NCNN 模型目录。
 - 需手动创建 `.env` 并设置 `DASHSCOPE_API_KEY`
 - 测试文件在 `PROJECT_STRUCTURE.md` 中文档化，但实际不在仓库中
 - 无CI/CD配置

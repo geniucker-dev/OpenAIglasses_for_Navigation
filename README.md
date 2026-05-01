@@ -60,7 +60,7 @@
 ### 硬件要求
 - **开发/服务器端**：
   - CPU: Intel i5 或以上（推荐 i7/i9）
-  - GPU: 可选。NVIDIA GPU（CUDA）、AMD GPU（ROCm）、Apple Silicon（MPS）或纯 CPU 均可运行；如需更高帧率，推荐 RTX 3060 或以上
+  - GPU: 支持 Vulkan 的显卡或集成显卡。视觉推理运行时强制使用 NCNN/Vulkan；未配置设备时使用 `ncnn.get_default_gpu_index()` 自动选择，不回退 PyTorch
   - 内存: 8GB RAM（推荐 16GB）
   - 存储: 10GB 可用空间
 
@@ -72,7 +72,8 @@
 ### 软件要求
 - **操作系统**: Windows 10/11, Linux (Ubuntu 20.04+), macOS 10.15+
 - **Python**: 3.11
-- **PyTorch 安装**: 推荐使用 `uv pip --torch-backend=auto` 自动选择 CPU / CUDA / ROCm；macOS 安装后运行时自动使用 MPS（若可用）
+- **NCNN/Vulkan**: 本地视觉推理运行时只加载 `*_ncnn_model/`，未配置设备时使用 `ncnn.get_default_gpu_index()` 自动选择，不支持 PyTorch fallback
+- **PyTorch / Ultralytics**: 仅用于离线导出 NCNN 模型；运行时视觉链路不加载 `.pt`
 - **浏览器**: Chrome 90+, Firefox 88+, Edge 90+（用于 Web 监控）
 
 ### API 密钥
@@ -91,30 +92,40 @@ cd aiglass
 
 ### 2. 安装依赖
 
-#### 推荐安装方式（PyTorch 自动选择后端）
+#### 推荐安装方式（NCNN/Vulkan 运行时）
 ```bash
 uv sync
+```
+
+如果需要从 `.pt` 重新导出 `*_ncnn_model/`，再额外安装离线导出工具链：
+
+```bash
 uv pip install --torch-backend=auto torch torchvision ultralytics "clip @ git+https://github.com/ultralytics/CLIP.git"
 ```
 
 说明：
 
-- 默认 `uv sync` 只同步项目核心依赖；PyTorch / Ultralytics / CLIP 这条机器学习栈需要单独安装，避免后续 `uv sync` 把已安装的 CUDA / ROCm / CPU 变体覆盖回通用 wheel。
-- `uv pip --torch-backend=auto` 会为当前机器自动选择合适的 PyTorch 安装来源（如 CPU / CUDA / ROCm）。
-- macOS / Apple Silicon 不存在单独的 “MPS wheel”；安装 macOS 版 PyTorch 后，程序运行时会自动检测并使用 `mps`。
-- 如需 NVIDIA GPU 加速，请先确保本机 CUDA 驱动环境正常，再执行上面的安装命令。
-- 如需 AMD GPU 加速（ROCm），请先安装 ROCm 5.0+ 驱动，`uv pip --torch-backend=auto` 会自动识别 ROCm 环境。注意：ROCm 下系统会自动禁用 `cudnn.benchmark`（MIOpen autotuning 较慢），无需手动配置。
+- `uv sync` 同步项目核心依赖，其中包含运行时需要的 `ncnn` 和导出需要的 `pnnx`。
+- PyTorch / Ultralytics / CLIP 只用于离线导出 `*_ncnn_model/`；视觉运行时不加载 `.pt`，也不做 PyTorch fallback。
 - Linux 若安装 `pyaudio` 失败并提示缺少 `portaudio.h`，请先安装系统依赖，例如 Ubuntu / Debian 使用 `sudo apt install portaudio19-dev python3-dev`。
 
 ### 3. 下载模型文件
 
-将以下模型文件放入 `model/` 目录：
+将以下 `.pt` 源模型文件放入 `model/` 目录，并导出 NCNN 模型目录：
 
-| 模型文件 | 用途 | 大小 | 下载链接 |
+| 源模型文件 | 运行时 NCNN 目录 | 用途 | 下载链接 |
 |---------|------|------|---------|
-| `yolo-seg.pt` | 盲道分割 | ~50MB | [待补充] |
-| `yoloe-11l-seg.pt` | 开放词汇障碍物检测 | ~80MB | [待补充] |
-| `trafficlight.pt` | 红绿灯检测 | ~20MB | [待补充] |
+| `yolo-seg.pt` | `yolo-seg_ncnn_model/` | 盲道/斑马线分割 | [待补充] |
+| `yoloe-11l-seg.pt` | `yoloe-11l-seg_ncnn_model/` | 白名单障碍物分割 | [待补充] |
+| `trafficlight.pt` | `trafficlight_ncnn_model/` | 红绿灯检测 | [待补充] |
+
+导出命令：
+
+```bash
+uv run python scripts/export_ncnn_models.py
+```
+
+默认导出/推理尺寸为 `(480, 640)`，对应 ESP32 固件默认 `FRAMESIZE_VGA`。后端不会额外 resize 相机帧；如果修改相机分辨率，需要同步设置 `AIGLASS_CAMERA_WIDTH`、`AIGLASS_CAMERA_HEIGHT`、`AIGLASS_NCNN_IMGSZ` 并重新导出 NCNN 模型。
 
 ### 4. 配置 API 密钥
 
@@ -123,6 +134,16 @@ uv pip install --torch-backend=auto torch torchvision ultralytics "clip @ git+ht
 ```bash
 # .env
 DASHSCOPE_API_KEY=your_api_key_here
+AIGLASS_INFER_BACKEND=ncnn
+# 默认不设置时使用 ncnn.get_default_gpu_index() 自动选择；需要固定设备时再设置：
+# AIGLASS_NCNN_DEVICE=vulkan:0
+AIGLASS_REQUIRE_NCNN=1
+AIGLASS_CAMERA_WIDTH=640
+AIGLASS_CAMERA_HEIGHT=480
+AIGLASS_NCNN_IMGSZ=480,640
+BLIND_PATH_MODEL=model/yolo-seg_ncnn_model
+OBSTACLE_MODEL=model/yoloe-11l-seg_ncnn_model
+TRAFFIC_LIGHT_MODEL=model/trafficlight_ncnn_model
 ```
 
 ### 5. 补充缺失的音频文件
@@ -219,12 +240,12 @@ uv run pio run --target upload
 ┌─────────▼──────────────────▼──────────────────▼──────────────┐
 │                       模型推理层                              │
 │  ┌──────────────┐  ┌──────────────┐                         │
-│  │ YOLO 分割     │  │  YOLO-E 检测 │                         │
-│  │ (盲道/斑马线) │  │ (障碍物)     │                         │
+│  │ NCNN 盲道分割 │  │ NCNN 障碍物   │                         │
+│  │ (Vulkan)     │  │ (白名单YOLOE) │                         │
 │  └──────────────┘  └──────────────┘                         │
 │  ┌──────────────┐  ┌──────────────┐                         │
-│  │ 红绿灯检测    │  │ 光流稳定      │                         │
-│  │(HSV+YOLO)     │  │(Lucas-Kanade)│                         │
+│  │ NCNN红绿灯    │  │ 光流稳定      │                         │
+│  │ (Vulkan)     │  │(Lucas-Kanade)│                         │
 │  └──────────────┘  └──────────────┘                         │
 └───────────────────────────────────────────────────────────────┘
           │
@@ -340,7 +361,7 @@ uv run pio run --target upload
 - 相机断线重连后，导航状态机会保留原有导航状态，不再因为 camera websocket 重连而被重置回默认状态。
 - 当前已确认：前端状态框抖动主要反映 **ESP32 ⇄ 服务端** 媒体链路波动，不是浏览器渲染瓶颈。
 - 当前仓库中音频上行仍是 **PCM over WebSocket**，**未使用 Opus**。
-- 过马路分割模型与红绿灯 YOLO 模型现在都会显式使用 `device_utils.DEVICE`；在 Apple Silicon + PyTorch MPS 可用时，会优先跑在 `mps` 上。
+- 视觉推理运行时已统一为 **NCNN/Vulkan**，默认加载 `*_ncnn_model/`，未配置设备时使用 `ncnn.get_default_gpu_index()` 自动选择，不回退 PyTorch。
 - 面向 **ESP32 ⇄ 服务端** 的效果导向分析结论：
   - **视频上行**：若只看最终实时效果，优先考虑 **RTP/UDP**；若同时考虑 ESP32-S3 上的实现成熟度与工程自然度，**MJPEG/HTTP** 是最值得评估的替代方向。
   - **音频上行**：在 ESP32-S3 级别平台上，当前 PCM-over-WebSocket 仍是现实基线；若只看最终效果，带编解码与自适应能力的方案（如 WebRTC/Opus）理论上更优，但当前仓库未实现。
@@ -355,20 +376,20 @@ uv run pio run --target upload
 # 阿里云 API
 DASHSCOPE_API_KEY=sk-xxxxx
 
-# 设备选择（可选：cuda / mps / cpu）
-AIGLASS_DEVICE=mps
+# 视觉推理：强制 NCNN/Vulkan，不回退 PyTorch
+AIGLASS_INFER_BACKEND=ncnn
+# 可选：固定 NCNN/Vulkan 设备；不设置时使用 ncnn.get_default_gpu_index() 自动选择
+# AIGLASS_NCNN_DEVICE=vulkan:0
+AIGLASS_REQUIRE_NCNN=1
+AIGLASS_CAMERA_WIDTH=640
+AIGLASS_CAMERA_HEIGHT=480
+AIGLASS_NCNN_IMGSZ=480,640
 
-# AMP 混合精度（可选：auto / bf16 / fp16 / off，默认 auto）
-AIGLASS_AMP=auto
-
-# GPU 并发限流（可选，默认 2）
-AIGLASS_GPU_SLOTS=2
-
-# 模型路径（可选，使用默认路径可不配置）
-BLIND_PATH_MODEL=model/yolo-seg.pt
-OBSTACLE_MODEL=model/yoloe-11l-seg.pt
-YOLOE_MODEL_PATH=model/yoloe-11l-seg.pt
-TRAFFIC_LIGHT_MODEL=model/trafficlight.pt
+# 运行时模型路径必须是 *_ncnn_model 目录
+BLIND_PATH_MODEL=model/yolo-seg_ncnn_model
+OBSTACLE_MODEL=model/yoloe-11l-seg_ncnn_model
+YOLOE_MODEL_PATH=model/yoloe-11l-seg_ncnn_model
+TRAFFIC_LIGHT_MODEL=model/trafficlight_ncnn_model
 
 # 导航参数
 AIGLASS_MASK_MIN_AREA=1500      # 最小掩码面积
@@ -386,10 +407,10 @@ ENABLE_TTS=true                 # 启用语音播报
 优先通过环境变量覆盖默认路径，而不是直接改源码：
 
 ```bash
-BLIND_PATH_MODEL=/your/path/yolo-seg.pt
-OBSTACLE_MODEL=/your/path/yoloe-11l-seg.pt
-YOLOE_MODEL_PATH=/your/path/yoloe-11l-seg.pt
-TRAFFIC_LIGHT_MODEL=/your/path/trafficlight.pt
+BLIND_PATH_MODEL=/your/path/yolo-seg_ncnn_model
+OBSTACLE_MODEL=/your/path/yoloe-11l-seg_ncnn_model
+YOLOE_MODEL_PATH=/your/path/yoloe-11l-seg_ncnn_model
+TRAFFIC_LIGHT_MODEL=/your/path/trafficlight_ncnn_model
 ```
 
 ### 语音映射回退

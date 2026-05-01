@@ -60,15 +60,19 @@ REM 检查模型文件
 echo.
 echo 正在检查模型文件...
 set MISSING=0
-if exist model\yolo-seg.pt (echo [成功] yolo-seg.pt) else (echo [缺失] yolo-seg.pt & set MISSING=1)
-if exist model\yoloe-11l-seg.pt (echo [成功] yoloe-11l-seg.pt) else (echo [缺失] yoloe-11l-seg.pt & set MISSING=1)
-if exist model\trafficlight.pt (echo [成功] trafficlight.pt) else (echo [缺失] trafficlight.pt & set MISSING=1)
+if exist model\yolo-seg.pt (echo [成功] yolo-seg.pt) else (echo [缺失] yolo-seg.pt - 导出 NCNN 需要 & set MISSING=1)
+if exist model\yoloe-11l-seg.pt (echo [成功] yoloe-11l-seg.pt) else (echo [缺失] yoloe-11l-seg.pt - 导出 NCNN 需要 & set MISSING=1)
+if exist model\trafficlight.pt (echo [成功] trafficlight.pt) else (echo [缺失] trafficlight.pt - 导出 NCNN 需要 & set MISSING=1)
+if exist model\yolo-seg_ncnn_model (echo [成功] yolo-seg_ncnn_model) else (echo [缺失] yolo-seg_ncnn_model - 运行时必需 & set MISSING=1)
+if exist model\yoloe-11l-seg_ncnn_model (echo [成功] yoloe-11l-seg_ncnn_model) else (echo [缺失] yoloe-11l-seg_ncnn_model - 运行时必需 & set MISSING=1)
+if exist model\trafficlight_ncnn_model (echo [成功] trafficlight_ncnn_model) else (echo [缺失] trafficlight_ncnn_model - 运行时必需 & set MISSING=1)
 
 if %MISSING%==1 (
     echo.
-    echo [警告] 部分模型文件缺失
-    echo 请从以下地址下载并放入 model\ 目录:
+    echo [警告] 部分模型文件或 NCNN 目录缺失
+    echo 请从以下地址下载 .pt 并放入 model\ 目录:
     echo https://www.modelscope.cn/models/archifancy/AIGlasses_for_navigation
+    echo 然后执行: uv run python scripts/export_ncnn_models.py
 )
 
 REM 完成
@@ -81,7 +85,8 @@ echo 下一步:
 echo 1. 编辑 .env 文件，填入您的 API 密钥:
 echo    notepad .env
 echo.
-echo 2. 确保所有模型文件已放入 model\ 目录
+echo 2. 确保 .pt 源模型已放入 model\ 目录，并导出 NCNN 模型:
+echo    uv run python scripts/export_ncnn_models.py
 echo.
 echo 3. 启动系统:
 echo    uv run python app_main.py

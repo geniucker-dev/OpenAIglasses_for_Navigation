@@ -1,197 +1,162 @@
-# app/cloud/obstacle_detector_client.py
+# obstacle_detector_client.py
+# -*- coding: utf-8 -*-
 import logging
 import os
+from typing import Any, Dict, List
+
 import cv2
 import numpy as np
-import torch
-from ultralytics import YOLOE
-from typing import List, Dict, Any
+from ultralytics import YOLO
 
-# 导入统一的设备管理工具
-from device_utils import DEVICE, DEVICE_TYPE, IS_CUDA, AMP_DTYPE, gpu_infer_slot
+from ncnn_runtime import (
+    assert_frame_shape,
+    assert_ncnn_model_path,
+    predict_kwargs,
+    tensor_like_scalar,
+    tensor_like_to_numpy,
+)
 
 logger = logging.getLogger(__name__)
 
 
 class ObstacleDetectorClient:
-    def __init__(self, model_path: str = "models/yoloe-11l-seg.pt"):
+    WHITELIST_CLASSES = [
+        "bicycle",
+        "car",
+        "motorcycle",
+        "bus",
+        "truck",
+        "animal",
+        "scooter",
+        "stroller",
+        "dog",
+        "pole",
+        "post",
+        "column",
+        "pillar",
+        "stanchion",
+        "bollard",
+        "utility pole",
+        "telegraph pole",
+        "light pole",
+        "street pole",
+        "signpost",
+        "support post",
+        "vertical post",
+        "bench",
+        "chair",
+        "potted plant",
+        "hydrant",
+        "cone",
+        "stone",
+        "box",
+    ]
+
+    def __init__(self, model_path: str = "model/yoloe-11l-seg_ncnn_model"):
         self.model = None
-        self.whitelist_embeddings = None
-        self.WHITELIST_CLASSES = [
-            "bicycle",
-            "car",
-            "motorcycle",
-            "bus",
-            "truck",
-            "animal",
-            "scooter",
-            "stroller",
-            "dog",
-            "pole",
-            "post",
-            "column",
-            "pillar",
-            "stanchion",
-            "bollard",
-            "utility pole",
-            "telegraph pole",
-            "light pole",
-            "street pole",
-            "signpost",
-            "support post",
-            "vertical post",
-            "bench",
-            "chair",
-            "potted plant",
-            "hydrant",
-            "cone",
-            "stone",
-            "box",
-        ]
+        self.model_path = str(assert_ncnn_model_path(model_path, "障碍物检测模型"))
+        logger.info("正在加载 NCNN 障碍物模型: %s", self.model_path)
         try:
-            logger.info("正在加载 YOLOE 障碍物模型...")
-            self.model = YOLOE(model_path)
-            self.model.fuse()
-            logger.info(f"YOLOE 障碍物模型加载成功，使用设备: {DEVICE}")
-
-            logger.info("正在为 YOLOE 预计算白名单文本特征...")
-            if DEVICE_TYPE == "mps":
-                original_device = next(self.model.model.parameters()).device
-                self.model.to("cpu")
-                with torch.inference_mode():
-                    self.whitelist_embeddings = self.model.get_text_pe(
-                        self.WHITELIST_CLASSES
-                    )
-                self.model.to(DEVICE)
-                if self.whitelist_embeddings is not None:
-                    self.whitelist_embeddings = self.whitelist_embeddings.to(DEVICE)
-            elif AMP_DTYPE is not None:
-                with (
-                    torch.inference_mode(),
-                    torch.amp.autocast(device_type=DEVICE_TYPE, dtype=AMP_DTYPE),
-                ):
-                    self.whitelist_embeddings = self.model.get_text_pe(
-                        self.WHITELIST_CLASSES
-                    )
-            else:
-                self.whitelist_embeddings = self.model.get_text_pe(
-                    self.WHITELIST_CLASSES
-                )
-            logger.info("YOLOE 特征预计算完成。")
-
-            self.model.to(DEVICE)
+            self.model = YOLO(self.model_path)
+            logger.info("NCNN 障碍物模型加载成功")
         except Exception as e:
-            logger.error(f"YOLOE 模型加载或特征计算失败: {e}", exc_info=True)
+            logger.error("NCNN 障碍物模型加载失败: %s", e, exc_info=True)
             raise
 
     @staticmethod
-    def tensor_to_numpy_mask(mask_tensor):
-        if mask_tensor.dtype in (torch.bfloat16, torch.float16):
-            mask_tensor = mask_tensor.float()
+    def _class_name(names: Any, cls_id: int) -> str:
+        if isinstance(names, dict):
+            value = names.get(cls_id)
+            if value is not None:
+                return str(value)
+        elif isinstance(names, list) and 0 <= cls_id < len(names):
+            return str(names[cls_id])
 
-        mask = mask_tensor.cpu().numpy()
+        if 0 <= cls_id < len(ObstacleDetectorClient.WHITELIST_CLASSES):
+            return ObstacleDetectorClient.WHITELIST_CLASSES[cls_id]
+        return f"class_{cls_id}"
 
+    @staticmethod
+    def _mask_to_uint8(mask_value: Any, width: int, height: int) -> np.ndarray:
+        mask = tensor_like_to_numpy(mask_value)
+        if mask.ndim > 2:
+            mask = np.squeeze(mask)
         if mask.max() <= 1.0:
             mask = (mask > 0.5).astype(np.uint8) * 255
         else:
             mask = mask.astype(np.uint8)
-
+        if mask.shape[:2] != (height, width):
+            mask = cv2.resize(mask, (width, height), interpolation=cv2.INTER_NEAREST)
         return mask
 
     def detect(
         self, image: np.ndarray, path_mask: np.ndarray = None
     ) -> List[Dict[str, Any]]:
-        """
-        利用白名单作为提示词寻找障碍物。
-        如果提供了 path_mask，则执行与路径相关的空间过滤。
-        如果 path_mask 为 None，则进行全局检测。
-        """
+        """使用已固化白名单的 NCNN 障碍物模型检测。"""
         if self.model is None:
-            return []
+            raise RuntimeError("障碍物 NCNN 模型未加载")
 
-        H, W = image.shape[:2]
-        try:
-            self.model.set_classes(self.WHITELIST_CLASSES, self.whitelist_embeddings)
-        except Exception as e:
-            logger.error(f"设置 YOLOE 提示词失败: {e}")
-            return []
-
+        assert_frame_shape(image, "obstacle frame")
+        height, width = image.shape[:2]
         conf_thr = float(os.getenv("AIGLASS_OBS_CONF", "0.25"))
-        with gpu_infer_slot():
-            results = self.model.predict(image, verbose=False, conf=conf_thr)
 
-        if not (results and results[0].masks):
+        results = self.model.predict(image, **predict_kwargs(conf=conf_thr))
+        if not results:
             return []
 
-        # --- 过滤与后处理 (逻辑与 blindpath 工作流保持一致) ---
-        final_obstacles = []
-        num_masks = len(results[0].masks.data)
-        num_boxes = (
-            len(results[0].boxes.cls)
-            if getattr(results[0].boxes, "cls", None) is not None
-            else 0
-        )
+        result = results[0]
+        masks_obj = getattr(result, "masks", None)
+        boxes_obj = getattr(result, "boxes", None)
+        if masks_obj is None or getattr(masks_obj, "data", None) is None:
+            if boxes_obj is not None and len(boxes_obj) > 0:
+                raise RuntimeError("障碍物 NCNN 有检测框但缺少 masks")
+            return []
+        if boxes_obj is None or getattr(boxes_obj, "cls", None) is None:
+            raise RuntimeError("障碍物 NCNN 输出缺少 boxes.cls，无法完成白名单类别映射")
 
-        for i, mask_tensor in enumerate(results[0].masks.data):
+        masks_data = list(masks_obj.data)
+        cls_data = list(boxes_obj.cls)
+        num_boxes = len(cls_data)
+        names_map = getattr(result, "names", getattr(self.model, "names", {}))
+
+        final_obstacles: List[Dict[str, Any]] = []
+        for i, mask_value in enumerate(masks_data):
             if i >= num_boxes:
                 continue
 
-            # 【修复】处理 BFloat16 类型的掩码
-            # 先转换为 float32，避免 numpy 不支持 BFloat16 的问题
-            if mask_tensor.dtype == torch.bfloat16:
-                mask_tensor = mask_tensor.float()
-
-            # 转换为 numpy 数组
-            mask = mask_tensor.cpu().numpy()
-
-            # 处理概率掩码（值在0-1之间）或二值掩码
-            if mask.max() <= 1.0:
-                # 概率掩码，需要二值化
-                mask = (mask > 0.5).astype(np.uint8) * 255
-            else:
-                # 已经是二值掩码
-                mask = mask.astype(np.uint8)
-
-            mask = cv2.resize(mask, (W, H), interpolation=cv2.INTER_NEAREST)
-            area = np.sum(mask > 0)
-
-            # 尺寸过滤：太大的物体（如整片地面）通常是误识别
-            if (area / (H * W)) > 0.7:
+            mask = self._mask_to_uint8(mask_value, width, height)
+            area = int(np.sum(mask > 0))
+            if area <= 0:
                 continue
 
-            # 空间过滤：如果提供了 path_mask，则只保留路径上的障碍物
+            if (area / (height * width)) > 0.7:
+                continue
+
             if path_mask is not None:
+                if path_mask.shape[:2] != (height, width):
+                    path_mask = cv2.resize(
+                        path_mask, (width, height), interpolation=cv2.INTER_NEAREST
+                    )
                 intersection_area = np.sum(cv2.bitwise_and(mask, path_mask) > 0)
-                # 必须与路径有足够的重叠
                 if intersection_area < 100 or (intersection_area / area) < 0.01:
                     continue
 
-            cls_id = int(results[0].boxes.cls[i])
-            class_names_map = results[0].names
-            class_name = "Unknown"
-            if isinstance(class_names_map, dict):
-                # 如果是字典，使用 .get() 方法
-                class_name = class_names_map.get(cls_id, "Unknown")
-            elif isinstance(class_names_map, list) and 0 <= cls_id < len(
-                class_names_map
-            ):
-                # 如果是列表，通过索引安全地获取
-                class_name = class_names_map[cls_id]
+            cls_id = int(tensor_like_scalar(cls_data[i]))
+            class_name = self._class_name(names_map, cls_id).strip()
 
-            # 计算距离指标
             y_coords, x_coords = np.where(mask > 0)
             if len(y_coords) == 0:
                 continue
 
             final_obstacles.append(
                 {
-                    "name": class_name.strip(),
+                    "name": class_name,
                     "mask": mask,
                     "area": area,
-                    "area_ratio": area / (H * W),
-                    "center_x": np.mean(x_coords),
-                    "center_y": np.mean(y_coords),
-                    "bottom_y_ratio": np.max(y_coords) / H,
+                    "area_ratio": area / (height * width),
+                    "center_x": float(np.mean(x_coords)),
+                    "center_y": float(np.mean(y_coords)),
+                    "bottom_y_ratio": float(np.max(y_coords) / height),
                 }
             )
 

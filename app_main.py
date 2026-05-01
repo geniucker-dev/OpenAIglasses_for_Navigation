@@ -11,7 +11,6 @@ from workflow_blindpath import BlindPathNavigator
 
 # 新增：导入过马路导航器
 from workflow_crossstreet import CrossStreetNavigator
-import torch
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
@@ -21,10 +20,14 @@ import cv2
 import numpy as np
 from ultralytics import YOLO
 from obstacle_detector_client import ObstacleDetectorClient
-from device_utils import DEVICE, IS_CUDA
-
-import torch  # 添加这行
-
+from ncnn_runtime import (
+    assert_frame_shape,
+    assert_ncnn_model_path,
+    get_expected_frame_hw,
+    get_infer_device,
+    get_ncnn_imgsz,
+    predict_kwargs,
+)
 
 import bridge_io
 
@@ -159,124 +162,70 @@ def reset_trafficlight_runtime_state():
 
 # 【新增】模型加载函数
 def load_navigation_models():
-    """加载盲道导航所需的模型"""
+    """加载盲道导航所需的 NCNN 模型。"""
     global yolo_seg_model, obstacle_detector
 
     try:
-        seg_model_path = os.getenv("BLIND_PATH_MODEL", "model/yolo-seg.pt")
+        frame_h, frame_w = get_expected_frame_hw()
+        ncnn_imgsz = get_ncnn_imgsz()
+        ncnn_device = get_infer_device()
+        print(
+            f"[NAVIGATION] NCNN/Vulkan 配置: device={ncnn_device}, "
+            f"camera_hw=({frame_h}, {frame_w}), imgsz={ncnn_imgsz}"
+        )
 
-        if os.path.exists(seg_model_path):
-            print(f"[NAVIGATION] 模型文件存在，开始加载...")
-            yolo_seg_model = YOLO(seg_model_path)
-            yolo_seg_model.to(DEVICE)
-            print(f"[NAVIGATION] 盲道分割模型加载成功，设备: {DEVICE}")
+        seg_model_path = os.getenv("BLIND_PATH_MODEL", "model/yolo-seg_ncnn_model")
+        assert_ncnn_model_path(seg_model_path, "盲道分割模型")
+        print(f"[NAVIGATION] 加载盲道 NCNN 模型: {seg_model_path}")
+        yolo_seg_model = YOLO(seg_model_path)
+        print(f"[NAVIGATION] 盲道 NCNN 模型加载成功，推理设备: {ncnn_device}")
 
-            try:
-                test_img = np.zeros((640, 640, 3), dtype=np.uint8)
-                results = yolo_seg_model.predict(
-                    test_img,
-                    device=DEVICE,
-                    verbose=False,
-                )
+        test_img = np.zeros((frame_h, frame_w, 3), dtype=np.uint8)
+        results = yolo_seg_model.predict(test_img, **predict_kwargs())
+        if results is None:
+            raise RuntimeError("盲道 NCNN 模型预热未返回结果")
+        print(
+            f"[NAVIGATION] 盲道 NCNN 模型预热成功，类别数: "
+            f"{len(yolo_seg_model.names) if hasattr(yolo_seg_model, 'names') else '未知'}"
+        )
+        if hasattr(yolo_seg_model, "names"):
+            print(f"[NAVIGATION] 盲道模型类别: {yolo_seg_model.names}")
+
+        obstacle_model_path = os.getenv("OBSTACLE_MODEL", "model/yoloe-11l-seg_ncnn_model")
+        assert_ncnn_model_path(obstacle_model_path, "障碍物检测模型")
+        print(f"[NAVIGATION] 加载障碍物 NCNN 模型: {obstacle_model_path}")
+        obstacle_detector = ObstacleDetectorClient(model_path=obstacle_model_path)
+        print("[NAVIGATION] ========== 障碍物 NCNN 检测器加载成功 ==========")
+
+        if hasattr(obstacle_detector, "WHITELIST_CLASSES"):
+            print(f"[NAVIGATION] 白名单类别数: {len(obstacle_detector.WHITELIST_CLASSES)}")
+            print(
+                f"[NAVIGATION] 白名单前10个类别: "
+                f"{', '.join(obstacle_detector.WHITELIST_CLASSES[:10])}"
+            )
+
+        print("[NAVIGATION] 开始测试障碍物 NCNN 检测功能...")
+        test_results = obstacle_detector.detect(test_img)
+        print("[NAVIGATION] 障碍物 NCNN 检测测试成功!")
+        print(f"[NAVIGATION] 测试检测结果数: {len(test_results)}")
+        if test_results:
+            print("[NAVIGATION] 测试检测到的物体:")
+            for i, obj in enumerate(test_results):
                 print(
-                    f"[NAVIGATION] 模型测试成功，支持的类别数: {len(yolo_seg_model.names) if hasattr(yolo_seg_model, 'names') else '未知'}"
+                    f"  - 物体 {i + 1}: {obj.get('name', 'unknown')}, "
+                    f"面积比例: {obj.get('area_ratio', 0):.3f}, "
+                    f"位置: ({obj.get('center_x', 0):.0f}, {obj.get('center_y', 0):.0f})"
                 )
-                if hasattr(yolo_seg_model, "names"):
-                    print(f"[NAVIGATION] 模型类别: {yolo_seg_model.names}")
-            except Exception as e:
-                print(f"[NAVIGATION] 模型测试失败: {e}")
-                yolo_seg_model = None
-        else:
-            print(f"[NAVIGATION] 错误：找不到模型文件: {seg_model_path}")
-            print(f"[NAVIGATION] 当前工作目录: {os.getcwd()}")
-            print(f"[NAVIGATION] 请检查文件路径是否正确")
-
-        obstacle_model_path = os.getenv("OBSTACLE_MODEL", "model/yoloe-11l-seg.pt")
-        print(f"[NAVIGATION] 尝试加载障碍物检测模型: {obstacle_model_path}")
-
-        if os.path.exists(obstacle_model_path):
-            print(f"[NAVIGATION] 障碍物检测模型文件存在，开始加载...")
-            try:
-                obstacle_detector = ObstacleDetectorClient(
-                    model_path=obstacle_model_path
-                )
-                print(f"[NAVIGATION] ========== YOLO-E 障碍物检测器加载成功 ==========")
-
-                if (
-                    hasattr(obstacle_detector, "model")
-                    and obstacle_detector.model is not None
-                ):
-                    print(f"[NAVIGATION] YOLO-E 模型已初始化")
-                    print(
-                        f"[NAVIGATION] 模型设备: {next(obstacle_detector.model.parameters()).device}"
-                    )
-                else:
-                    print(f"[NAVIGATION] 警告：YOLO-E 模型初始化异常")
-
-                if hasattr(obstacle_detector, "WHITELIST_CLASSES"):
-                    print(
-                        f"[NAVIGATION] 白名单类别数: {len(obstacle_detector.WHITELIST_CLASSES)}"
-                    )
-                    print(
-                        f"[NAVIGATION] 白名单前10个类别: {', '.join(obstacle_detector.WHITELIST_CLASSES[:10])}"
-                    )
-                else:
-                    print(f"[NAVIGATION] 警告：白名单类别未定义")
-
-                if (
-                    hasattr(obstacle_detector, "whitelist_embeddings")
-                    and obstacle_detector.whitelist_embeddings is not None
-                ):
-                    print(f"[NAVIGATION] YOLO-E 文本特征已预计算")
-                    print(
-                        f"[NAVIGATION] 文本特征张量形状: {obstacle_detector.whitelist_embeddings.shape if hasattr(obstacle_detector.whitelist_embeddings, 'shape') else '未知'}"
-                    )
-                else:
-                    print(f"[NAVIGATION] 警告：YOLO-E 文本特征未预计算")
-
-                # 测试障碍物检测功能
-                print(f"[NAVIGATION] 开始测试 YOLO-E 检测功能...")
-                try:
-                    test_img = np.zeros((640, 640, 3), dtype=np.uint8)
-                    # 在测试图像中画一个白色矩形，模拟一个物体
-                    cv2.rectangle(test_img, (200, 200), (400, 400), (255, 255, 255), -1)
-
-                    # 测试检测（不提供 path_mask）
-                    test_results = obstacle_detector.detect(test_img)
-                    print(f"[NAVIGATION] YOLO-E 检测测试成功!")
-                    print(f"[NAVIGATION] 测试检测结果数: {len(test_results)}")
-
-                    if len(test_results) > 0:
-                        print(f"[NAVIGATION] 测试检测到的物体:")
-                        for i, obj in enumerate(test_results):
-                            print(
-                                f"  - 物体 {i + 1}: {obj.get('name', 'unknown')}, "
-                                f"面积比例: {obj.get('area_ratio', 0):.3f}, "
-                                f"位置: ({obj.get('center_x', 0):.0f}, {obj.get('center_y', 0):.0f})"
-                            )
-                except Exception as e:
-                    print(f"[NAVIGATION] YOLO-E 检测测试失败: {e}")
-                    import traceback
-
-                    traceback.print_exc()
-                    obstacle_detector = None
-
-                print(f"[NAVIGATION] ========== YOLO-E 障碍物检测器加载完成 ==========")
-
-            except Exception as e:
-                print(f"[NAVIGATION] 障碍物检测器加载失败: {e}")
-                import traceback
-
-                traceback.print_exc()
-                obstacle_detector = None
-        else:
-            print(f"[NAVIGATION] 警告：找不到障碍物检测模型文件: {obstacle_model_path}")
+        print("[NAVIGATION] ========== NCNN 导航模型加载完成 ==========")
 
     except Exception as e:
-        print(f"[NAVIGATION] 模型加载失败: {e}")
+        yolo_seg_model = None
+        obstacle_detector = None
+        print(f"[NAVIGATION] NCNN 模型加载失败: {e}")
         import traceback
 
         traceback.print_exc()
+        raise
 
 
 # ============== 关键：系统级"硬重置"总闸 =================
@@ -938,6 +887,8 @@ async def ws_camera_esp(ws: WebSocket):
                         if frame_counter % 30 == 0:
                             print(f"[JPEG] 解码失败：数据长度={len(data)}")
                         bgr = None
+                    else:
+                        assert_frame_shape(bgr, "camera frame")
                 except Exception as e:
                     if frame_counter % 30 == 0:
                         print(f"[JPEG] 解码异常: {e}")
@@ -1490,7 +1441,8 @@ async def on_startup():
             if trafficlight_detection.init_model():
                 print("[TRAFFIC_LIGHT] 红绿灯检测模型预加载成功")
                 try:
-                    test_img = np.zeros((640, 640, 3), dtype=np.uint8)
+                    frame_h, frame_w = get_expected_frame_hw()
+                    test_img = np.zeros((frame_h, frame_w, 3), dtype=np.uint8)
                     _ = trafficlight_detection.process_single_frame(test_img)
                     print("[TRAFFIC_LIGHT] 模型预热完成")
                 except Exception as e:

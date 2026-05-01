@@ -1,117 +1,48 @@
-# app/models.py
+# models.py
+# -*- coding: utf-8 -*-
+"""Legacy model preload compatibility module.
+
+本项目视觉运行时已统一迁移为 NCNN/Vulkan；此模块只保留少量全局引用，避免旧入口误用 PyTorch 模型。
+"""
+
+from __future__ import annotations
+
 import logging
-import torch
-from threading import Semaphore
-from contextlib import contextmanager
-from typing import List
-from app.cloud.obstacle_detector_client import ObstacleDetectorClient
+import os
 
-# ==========================================================
-# 0. 导入所有需要的模型封装类 (Clients) 和 Ultralytics 基类
-# ==========================================================
-# 这是过马路工作流使用的封装类
-from app.cloud.crosswalk_detector_client import CrosswalkDetector
-from app.cloud.coco_perception_client import COCOClient
+import numpy as np
+from ultralytics import YOLO
+
+from ncnn_runtime import assert_ncnn_model_path, get_expected_frame_hw, predict_kwargs
 from obstacle_detector_client import ObstacleDetectorClient
-
-# 这是盲道工作流直接使用的 Ultralytics 类
-from ultralytics import YOLO, YOLOE
-
-# 导入统一的设备管理工具 (CUDA > MPS > CPU 自动 fallback)
-from device_utils import DEVICE, gpu_infer_slot, to_device
 
 logger = logging.getLogger(__name__)
 
-# ==========================================================
-# 2. 全局模型实例定义 (全部初始化为 None)
-# ==========================================================
-
-# --- 过马路工作流模型 (通过Client类封装) ---
-crosswalk_detector_client: CrosswalkDetector = None
-coco_client: COCOClient = None
-# ObstacleDetectorClient 将作为所有场景的通用障碍物检测器
-obstacle_detector_client: ObstacleDetectorClient = None
-
-# --- 盲道工作流模型 (直接使用Ultralytics类) ---
-# 它们主要用于分割和路径规划，与过马路场景的检测逻辑不同
-blindpath_seg_model: YOLO = None
-# 障碍物检测将复用 obstacle_detector_client，但YOLOE的文本特征需要单独保存
-blindpath_whitelist_embeddings = None
-
-# 全局加载状态标志
+obstacle_detector_client: ObstacleDetectorClient | None = None
+blindpath_seg_model: YOLO | None = None
 models_are_loaded = False
 
 
-# ==========================================================
-# 3. 统一的模型加载函数 (由 celery.py 在启动时调用)
-# ==========================================================
 def init_all_models():
-    """
-    在Celery Worker进程启动时被调用一次。
-    负责加载所有工作流所需的模型到全局变量中。
-    """
-    global models_are_loaded
+    """加载 NCNN/Vulkan 视觉模型；不提供 PyTorch fallback。"""
+    global models_are_loaded, obstacle_detector_client, blindpath_seg_model
     if models_are_loaded:
         return
 
-    logger.info(f"========= 🚀 开始全局模型预加载 (目标设备: {DEVICE}) =========")
+    seg_path = os.getenv("BLIND_PATH_MODEL", "model/yolo-seg_ncnn_model")
+    obs_path = os.getenv("OBSTACLE_MODEL", "model/yoloe-11l-seg_ncnn_model")
 
-    try:
-        # --- [1] 加载通用的障碍物检测器 (ObstacleDetectorClient) ---
-        global obstacle_detector_client
-        logger.info("[1/4] 正在加载通用障碍物检测模型 (ObstacleDetectorClient)...")
-        obstacle_detector_client = ObstacleDetectorClient(
-            model_path="models/yoloe-11l-seg.pt"
-        )
+    logger.info("========= 开始预加载 NCNN/Vulkan 视觉模型 =========")
+    assert_ncnn_model_path(seg_path, "盲道分割模型")
+    assert_ncnn_model_path(obs_path, "障碍物检测模型")
 
-        if (
-            hasattr(obstacle_detector_client, "model")
-            and obstacle_detector_client.model is not None
-        ):
-            to_device(obstacle_detector_client.model)
+    blindpath_seg_model = YOLO(seg_path)
+    obstacle_detector_client = ObstacleDetectorClient(obs_path)
 
-        logger.info("...通用障碍物检测模型加载成功。")
+    h, w = get_expected_frame_hw()
+    blank = np.zeros((h, w, 3), dtype=np.uint8)
+    blindpath_seg_model.predict(blank, **predict_kwargs())
+    obstacle_detector_client.detect(blank)
 
-        # --- [2] 加载过马路专用的模型 (Clients) ---
-        global crosswalk_detector_client, coco_client
-        logger.info("[2/4] 正在加载过马路分割模型 (CrosswalkDetector)...")
-        crosswalk_detector_client = CrosswalkDetector(model_path="models/yolo-seg.pt")
-        # 将其内部的YOLO模型移动到指定设备
-        if (
-            hasattr(crosswalk_detector_client, "model")
-            and crosswalk_detector_client.model is not None
-        ):
-            to_device(crosswalk_detector_client.model)
-        logger.info("...过马路分割模型加载成功。")
-
-        logger.info("[3/4] 正在加载通用感知模型 (COCOClient)...")
-        coco_client = COCOClient(model_path="models/yolov8l-world.pt")
-        # 将其内部的YOLO模型移动到指定设备
-        if hasattr(coco_client, "model") and coco_client.model is not None:
-            to_device(coco_client.model)
-        logger.info("...通用感知模型加载成功。")
-
-        # --- [4] 加载盲道专用的模型 ---
-        global blindpath_seg_model, blindpath_whitelist_embeddings
-        logger.info("[4/4] 正在加载盲道专用分割模型 (YOLO)...")
-        blindpath_seg_model = YOLO("models/yolo-seg.pt")
-        to_device(blindpath_seg_model)
-        blindpath_seg_model.fuse()
-        logger.info("...盲道专用分割模型加载成功。")
-
-        # 为盲道工作流保存其需要的YOLOE文本特征引用
-        if obstacle_detector_client:
-            blindpath_whitelist_embeddings = (
-                obstacle_detector_client.whitelist_embeddings
-            )
-            logger.info("...已为盲道工作流链接障碍物模型特征。")
-
-        # 所有模型加载完毕
-        models_are_loaded = True
-        logger.info("========= ✅ 所有模型已成功预加载。Worker准备就绪! =========")
-
-    except Exception as e:
-        logger.error(f"模型预加载过程中发生严重错误: {e}", exc_info=True)
-        # 抛出异常，这将导致Celery Worker启动失败，这是合理的行为
-        # 因为一个没有模型的Worker是无用的，提前暴露问题更好。
-        raise
+    models_are_loaded = True
+    logger.info("========= NCNN/Vulkan 视觉模型预加载完成 =========")
