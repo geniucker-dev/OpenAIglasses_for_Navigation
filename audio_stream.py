@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 import asyncio
 from dataclasses import dataclass
-from typing import Optional, Set, List, Tuple, Any, Dict
+from typing import Set, List
 from fastapi import Request
 from fastapi.responses import StreamingResponse
 
@@ -11,27 +11,6 @@ STREAM_SR = 8000  # 改为8kHz，ESP32支持
 STREAM_CH = 1
 STREAM_SW = 2
 BYTES_PER_20MS_16K = STREAM_SR * STREAM_SW * 20 // 1000  # 320B (8kHz)
-
-# ===== AI 播放任务总闸 =====
-current_ai_task: Optional[asyncio.Task[Any]] = None
-
-async def cancel_current_ai():
-    """取消当前大模型语音任务，并等待其退出。"""
-    global current_ai_task
-    task = current_ai_task
-    current_ai_task = None
-    if task and not task.done():
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
-        except Exception:
-            pass
-
-def is_playing_now() -> bool:
-    t = current_ai_task
-    return (t is not None) and (not t.done())
 
 # ===== /stream.wav 连接管理 =====
 @dataclass(frozen=True)
@@ -58,10 +37,8 @@ def _wav_header_unknown_size(sr=16000, ch=1, sw=2) -> bytes:
 
 async def hard_reset_audio(reason: str = ""):
     """
-    **一键清场**：丢弃所有播放器连接（abort_event置位）+ 取消当前AI任务。
-    这样旧的音频不会再有任何去处，也没有任何任务继续产出。
+    丢弃所有播放器连接，让旧音频不会继续输出到设备。
     """
-    # 1) 断开所有正在播放的 HTTP 连接
     for sc in list(stream_clients):
         try:
             sc.abort_event.set()
@@ -69,10 +46,6 @@ async def hard_reset_audio(reason: str = ""):
             pass
     stream_clients.clear()
 
-    # 2) 取消当前AI任务
-    await cancel_current_ai()
-
-    # 3) 日志
     if reason:
         print(f"[HARD-RESET] {reason}")
 
@@ -89,7 +62,7 @@ async def broadcast_pcm16_realtime(pcm16: bytes, stop_event=None):
 
         try:
             import sync_recorder
-            sync_recorder.record_audio(piece, text="[Omni对话]")
+            sync_recorder.record_audio(piece, text="[系统语音]")
         except Exception:
             pass  # 静默失败，不影响播放
 

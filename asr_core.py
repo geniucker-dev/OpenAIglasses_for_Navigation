@@ -97,8 +97,8 @@ class ASRCallback:
     """
     设计目标：
     1) “停下 / 别说了 …”等热词一出现 → 立刻全清零复位（恢复到刚启动后的状态）。
-    2) 除此之外【不接受打断】；AI 正在播报时，用户说话只做展示，不触发新一轮。
-    3) 不再用 partial 叠加字符串；partial 只用于 UI 临时展示；只有 final sentence 用于驱动 AI。
+    2) 除此之外不接受打断；语音 final 只作为系统指令处理。
+    3) 不再用 partial 叠加字符串；partial 只用于 UI 临时展示。
     """
 
     def __init__(
@@ -107,8 +107,7 @@ class ASRCallback:
         post: Callable[[asyncio.Future], None],
         ui_broadcast_partial,
         ui_broadcast_final,
-        is_playing_now_fn: Callable[[], bool],
-        start_ai_with_text_fn,               # async (text)
+        handle_command_text_fn,               # async (text)
         full_system_reset_fn,                 # async (reason)
         interrupt_lock: asyncio.Lock,
     ):
@@ -120,8 +119,7 @@ class ASRCallback:
 
         self._ui_partial = ui_broadcast_partial
         self._ui_final   = ui_broadcast_final
-        self._is_playing = is_playing_now_fn
-        self._start_ai   = start_ai_with_text_fn
+        self._handle_command = handle_command_text_fn
         self._full_reset = full_system_reset_fn
         self._interrupt_lock = interrupt_lock
 
@@ -162,13 +160,13 @@ class ASRCallback:
         if not text:
             return
 
-        # ---------- ① 热词优先：命中就全清零并短路，绝不送 LLM ----------
+        # ---------- ① 热词优先：命中就全清零并短路，绝不进入指令处理 ----------
         if not self._hot_interrupted and self._has_hotword(text):
             self._hot_interrupted = True
 
             async def _hot_reset():
                 async with self._interrupt_lock:
-                    print(f"[ASR HOTWORD] '{text}' -> FULL RESET, skip LLM", flush=True)
+                    print(f"[ASR HOTWORD] '{text}' -> FULL RESET, skip command", flush=True)
                     reset_ok = await self._full_reset("Hotword interrupt")
                     if not reset_ok:
                         print("[ASR HOTWORD] FULL RESET incomplete", flush=True)
@@ -190,7 +188,7 @@ class ASRCallback:
         except Exception:
             pass
 
-        # ---------- ③ final：仅 final 驱动 LLM（若未在播报） ----------
+        # ---------- ③ final：仅 final 驱动系统指令 ----------
         if is_end is True:
             final_text = text
             try:
@@ -199,11 +197,11 @@ class ASRCallback:
             except Exception:
                 pass
 
-            if (not self._is_playing()) and final_text:
+            if final_text:
                 async def _run_final():
                     async with self._interrupt_lock:
-                        print(f"[LLM INPUT TEXT] {final_text}", flush=True)
-                        await self._start_ai(final_text)
+                        print(f"[COMMAND INPUT TEXT] {final_text}", flush=True)
+                        await self._handle_command(final_text)
                 try:
                     self._post(_run_final())
                 except Exception:

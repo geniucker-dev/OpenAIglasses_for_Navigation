@@ -1,9 +1,7 @@
 # app_main.py
 # -*- coding: utf-8 -*-
 import os, sys, time, json, asyncio
-from typing import Any, Dict, Optional, Tuple, List, Callable, Set, Deque
-from collections import deque
-from dataclasses import dataclass
+from typing import Any, Dict, Optional, List, Callable, Set
 from contextlib import asynccontextmanager
 import re
 
@@ -54,7 +52,7 @@ except Exception:
 # ---- DashScope ASR 基础 ----
 from dashscope import audio as dash_audio  # 若未安装，会在原项目里抛错提示
 
-API_KEY = os.getenv("DASHSCOPE_API_KEY", "sk-a9440db694924559ae4ebdc2023d2b9a")
+API_KEY = os.getenv("DASHSCOPE_API_KEY", "")
 if not API_KEY:
     raise RuntimeError("未设置 DASHSCOPE_API_KEY")
 
@@ -67,11 +65,9 @@ SILENCE_20MS = bytes(BYTES_CHUNK)
 
 # ---- 引入我们的模块 ----
 from audio_stream import (
-    register_stream_route,  # 挂 /stream.wav
-    hard_reset_audio,  # 音频+AI 播放总闸
-    is_playing_now,
+    register_stream_route,
+    hard_reset_audio,
 )
-from omni_client import cleanup_producer_threads
 from asr_core import (
     ASRCallback,
     set_current_recognition,
@@ -111,7 +107,6 @@ ui_clients: Dict[int, WebSocket] = {}
 current_partial: str = ""
 recent_finals: List[str] = []
 RECENT_MAX = 50
-last_frames: Deque[Tuple[float, bytes]] = deque(maxlen=10)
 AUDIO_FRAME_STALE_SEC = 2.0
 CAMERA_FRAME_STALE_SEC = 2.5
 CAMERA_FIRST_FRAME_TIMEOUT_SEC = 4.0
@@ -145,24 +140,12 @@ cross_street_active = False
 orchestrator = None  # 新增
 startup_ready = False
 
-# 【新增】omni对话状态标志
-omni_conversation_active = False  # 标记omni对话是否正在进行
-omni_previous_nav_state = None  # 保存omni激活前的导航状态，用于恢复
-omni_session_generation = 0
-
 def reset_ui_session_state():
-    global current_partial, recent_finals, camera_status_cache, asr_status_cache, omni_conversation_active, omni_previous_nav_state
+    global current_partial, recent_finals, camera_status_cache, asr_status_cache
     current_partial = ""
     recent_finals = []
     camera_status_cache = None
     asr_status_cache = None
-    omni_conversation_active = False
-    omni_previous_nav_state = None
-
-def bump_omni_generation():
-    global omni_session_generation
-    omni_session_generation += 1
-    return omni_session_generation
 
 def clear_navigation_session_state():
     global blind_path_navigator, cross_street_navigator, orchestrator, navigation_active, cross_street_active
@@ -428,28 +411,24 @@ async def ui_broadcast_final(text: str):
     if len(recent_finals) > RECENT_MAX:
         recent_finals = recent_finals[-RECENT_MAX:]
     await ui_broadcast_raw("FINAL:" + text)
-    print(f"[ASR/AI FINAL] {text}", flush=True)
+    print(f"[ASR FINAL] {text}", flush=True)
 
 
 async def full_system_reset(reason: str = "") -> bool:
     """
     回到刚启动后的状态：
-    1) 停播 + 取消AI任务 + 切断所有/stream.wav（hard_reset_audio）
+    1) 停播 + 切断所有/stream.wav（hard_reset_audio）
     2) 停止 ASR 实时识别流（关键）
     3) 清 UI 状态
-    4) 清最近相机帧（避免把旧帧又拼进下一轮）
+    4) 清画面桥接缓存
     5) 告知 ESP32：RESET（可选）
     """
     global active_asr_stop_fn, asr_streaming_active, esp32_audio_last_frame_at
 
-    bump_omni_generation()
     reset_ui_session_state()
 
-    # 1) 音频&AI
     await hard_reset_audio(reason or "full_system_reset")
-    omni_threads_clean = cleanup_producer_threads()
 
-    # 2) ASR
     recognition_stopped = True
     if active_asr_stop_fn is not None:
         recognition_stopped = await active_asr_stop_fn()
@@ -461,8 +440,6 @@ async def full_system_reset(reason: str = "") -> bool:
             esp32_audio_last_frame_at = 0.0
     if not recognition_stopped:
         print("[SYSTEM] full reset incomplete: recognition stop failed.", flush=True)
-    if not omni_threads_clean:
-        print("[SYSTEM] full reset incomplete: omni producer thread still alive.", flush=True)
 
     reset_imu_runtime_state()
     traffic_reset_ok = reset_trafficlight_runtime_state()
@@ -480,13 +457,7 @@ async def full_system_reset(reason: str = "") -> bool:
     await ui_broadcast_raw("RESET_UI")
     await ui_broadcast_partial("")
 
-    # 4) 相机帧
-    try:
-        last_frames.clear()
-    except Exception:
-        pass
-
-    # 5) 通知 ESP32
+    # 4) 通知 ESP32
     try:
         if esp32_audio_ws and (esp32_audio_ws.client_state == WebSocketState.CONNECTED):
             await esp32_audio_ws.send_text("RESET")
@@ -496,11 +467,11 @@ async def full_system_reset(reason: str = "") -> bool:
     if not traffic_reset_ok:
         print("[SYSTEM] full reset incomplete: traffic-light runtime reset failed.", flush=True)
 
-    if yolomedia_stopped and recognition_stopped and traffic_reset_ok and omni_threads_clean:
+    if yolomedia_stopped and recognition_stopped and traffic_reset_ok:
         print("[SYSTEM] full reset done.", flush=True)
     else:
         print("[SYSTEM] full reset incomplete.", flush=True)
-    return bool(yolomedia_stopped and recognition_stopped and traffic_reset_ok and omni_threads_clean)
+    return bool(yolomedia_stopped and recognition_stopped and traffic_reset_ok)
 
 
 # ========= 启动/停止 YOLO 媒体处理 =========
@@ -590,64 +561,15 @@ def stop_yolomedia() -> bool:
     return True
 
 
-# ========= 自定义的 start_ai_with_text，支持识别特殊命令 =========
-async def start_ai_with_text_custom(user_text: str):
-    """扩展版的AI启动函数，支持识别特殊命令"""
+# ========= 自定义文本指令处理，支持识别特殊命令 =========
+async def handle_command_text(user_text: str):
+    """处理语音/调试文本中的系统指令；不进入 AI 对话。"""
     global \
         navigation_active, \
         blind_path_navigator, \
         cross_street_active, \
         cross_street_navigator, \
         orchestrator
-
-    # 【修改】在导航模式和红绿灯检测模式下，只有特定词才进入omni对话
-    if orchestrator:
-        current_state = orchestrator.get_state()
-        # 如果在导航模式或红绿灯检测模式（非CHAT模式）
-        if current_state not in ["CHAT", "IDLE"]:
-            # 检查是否是允许的对话触发词
-            allowed_keywords = [
-                "帮我看",
-                "帮我看下",
-                "帮我找",
-                "找一下",
-                "看看",
-                "识别一下",
-            ]
-            is_allowed_query = any(keyword in user_text for keyword in allowed_keywords)
-
-            # 检查是否是导航控制命令
-            nav_control_keywords = [
-                "开始过马路",
-                "过马路结束",
-                "结束过马路",
-                "停止过马路",
-                "取消过马路",
-                "开始导航",
-                "盲道导航",
-                "停止导航",
-                "结束导航",
-                "取消导航",
-                "检测红绿灯",
-                "看红绿灯",
-                "停止检测",
-                "取消检测",
-                "停止红绿灯",
-                "取消红绿灯",
-            ]
-            is_nav_control = any(
-                keyword in user_text for keyword in nav_control_keywords
-            )
-
-            # 如果既不是允许的查询，也不是导航控制命令，则丢弃
-            if not is_allowed_query and not is_nav_control:
-                mode_name = (
-                    "红绿灯检测"
-                    if current_state == "TRAFFIC_LIGHT_DETECTION"
-                    else "导航"
-                )
-                print(f"[{mode_name}模式] 丢弃非对话语音: {user_text}")
-                return  # 直接丢弃，不进入omni
 
     # 【修改】检查是否是过马路相关命令 - 使用orchestrator控制
     if "开始过马路" in user_text or "帮我过马路" in user_text:
@@ -723,9 +645,9 @@ async def start_ai_with_text_custom(user_text: str):
             if not reset_trafficlight_runtime_state():
                 raise RuntimeError("红绿灯检测运行态清理失败")
 
-            # 恢复到对话模式
+            # 恢复到待机模式
             if orchestrator:
-                orchestrator.stop_navigation()  # 回到CHAT模式
+                orchestrator.stop_navigation()  # 回到待机模式
                 print(f"[TRAFFIC] 红绿灯检测停止，恢复到{orchestrator.get_state()}模式")
                 await ui_broadcast_final("[系统] 红绿灯检测已停止")
             else:
@@ -879,7 +801,7 @@ async def debug_text(request: Request):
         return {"success": False, "error": "Empty text"}
 
     async with interrupt_lock:
-        await start_ai_with_text_custom(user_text)
+        await handle_command_text(user_text)
     return {"success": True, "text": user_text}
 
 
@@ -887,7 +809,7 @@ async def debug_text(request: Request):
 register_stream_route(app)
 
 
-# ---------- WebSocket：WebUI 文本（ASR/AI 状态推送） ----------
+# ---------- WebSocket：WebUI 文本（ASR/状态推送） ----------
 @app.websocket("/ws_ui")
 async def ws_ui(ws: WebSocket):
     await ws.accept()
@@ -1024,8 +946,7 @@ async def ws_audio(ws: WebSocket):
                         post=post,
                         ui_broadcast_partial=ui_broadcast_partial,
                         ui_broadcast_final=ui_broadcast_final,
-                        is_playing_now_fn=is_playing_now,
-                        start_ai_with_text_fn=start_ai_with_text_custom,  # 使用自定义版本
+                        handle_command_text_fn=handle_command_text,
                         full_system_reset_fn=full_system_reset,
                         interrupt_lock=interrupt_lock,
                     )
@@ -1060,13 +981,11 @@ async def ws_audio(ws: WebSocket):
                         await ws.send_text("ERR:STOP_FAILED")
 
                 elif raw.startswith("PROMPT:"):
-                    # 设备端主动发起一轮：同样使用“先硬重置后播放”的强语义
+                    # 设备端主动发起文本指令
                     text = raw[len("PROMPT:") :].strip()
                     if text:
                         async with interrupt_lock:
-                            await start_ai_with_text_custom(
-                                text
-                            )  # 使用自定义的启动函数
+                            await handle_command_text(text)
                         await ws.send_text("OK:PROMPT_ACCEPTED")
                     else:
                         await ws.send_text("ERR:EMPTY_PROMPT")
@@ -1200,11 +1119,6 @@ async def ws_camera_esp(ws: WebSocket):
                     if frame_counter % 100 == 0:  # 避免日志刷屏
                         print(f"[RECORDER] 录制帧失败: {e}")
 
-                try:
-                    last_frames.append((time.time(), data))
-                except Exception:
-                    pass
-
                 # 推送到bridge_io（供yolomedia使用）
                 bridge_io.push_raw_jpeg(data)
 
@@ -1275,7 +1189,6 @@ async def ws_camera_esp(ws: WebSocket):
                             res = await asyncio.to_thread(orchestrator.process_frame, bgr)
 
                             # 语音引导（内部已节流）
-                            # 注：omni对话时已切换到CHAT模式，不会生成导航语音
                             state_after_processing = (
                                 orchestrator.get_state() if orchestrator else current_state
                             )
@@ -1365,7 +1278,6 @@ async def ws_camera_esp(ws: WebSocket):
             camera_connected_at = 0.0
             camera_last_frame_at = 0.0
             bridge_io.clear_frames()
-            last_frames.clear()
             print("[CAMERA] ESP32 disconnected")
             await broadcast_camera_status(force=True)
 
@@ -1728,12 +1640,6 @@ async def on_startup():
         startup_state_ok = False
 
     await hard_reset_audio("startup_preflight")
-    from audio_stream import current_ai_task as _startup_ai_task, stream_clients as _startup_stream_clients
-    if _startup_ai_task is not None or _startup_stream_clients:
-        startup_state_ok = False
-
-    if not cleanup_producer_threads():
-        startup_state_ok = False
 
     if not sanitize_audio_system_state():
         startup_state_ok = False
@@ -1742,8 +1648,6 @@ async def on_startup():
         startup_state_ok = False
 
     bridge_io.clear_frames()
-    last_frames.clear()
-    bump_omni_generation()
     reset_ui_session_state()
     clear_navigation_session_state()
     yolo_seg_model = None
@@ -1855,7 +1759,6 @@ async def on_startup():
 
         bridge_io.set_sender(None)
         bridge_io.clear_frames()
-        last_frames.clear()
         reset_imu_runtime_state()
         if not reset_trafficlight_runtime_state():
             print("[STARTUP] 启动失败时红绿灯运行态未完全重置", flush=True)
@@ -1966,8 +1869,6 @@ async def on_shutdown():
             retry_ok = False
 
         await hard_reset_audio("shutdown_retry")
-        if not cleanup_producer_threads():
-            retry_ok = False
         if shutdown_audio_system() is False:
             retry_ok = False
 
@@ -2071,17 +1972,13 @@ async def on_shutdown():
 
     bridge_io.set_sender(None)
     bridge_io.clear_frames()
-    last_frames.clear()
-    bump_omni_generation()
     reset_ui_session_state()
     clear_navigation_session_state()
     yolo_seg_model = None
     obstacle_detector = None
 
-    # 停止音频和AI任务
+    # 停止音频任务
     await hard_reset_audio("shutdown")
-    if not cleanup_producer_threads():
-        shutdown_ok = False
 
     if shutdown_audio_system() is False:
         shutdown_ok = False
@@ -2104,11 +2001,6 @@ async def on_shutdown():
 
 
 # app_main.py —— 在文件里已有的 @app.on_event("startup") 之后，再加一个新的 startup 钩子
-
-
-# --- 导出接口（可选） ---
-def get_last_frames():
-    return last_frames
 
 
 def get_camera_ws():

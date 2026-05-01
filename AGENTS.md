@@ -24,7 +24,6 @@
 ├── trafficlight_detection.py # 红绿灯YOLO检测
 ├── models.py                # 模型加载统一入口
 ├── asr_core.py              # 实时语音识别（DashScope Paraformer）
-├── omni_client.py           # Qwen-Omni多模态对话
 ├── audio_player.py          # 多路音频混音播放
 ├── audio_compressor.py      # 音频压缩
 ├── audio_stream.py          # /stream.wav HTTP音频流
@@ -33,7 +32,6 @@
 ├── device_utils.py          # 设备选择 (CUDA/ROCm/MPS/CPU) + AMP + GPU并发限流
 ├── crosswalk_awareness.py   # 斑马线感知
 ├── qwen_extractor.py        # Qwen标签提取
-├── qwenturbo_template.py    # Qwen-Turbo提示模板
 ├── utils.py                 # 通用工具函数
 ├── templates/
 │   └── index.html           # Web监控界面（含滚动聊天面板）
@@ -58,7 +56,7 @@
 | 任务 | 文件 | 关键符号 |
 |------|------|----------|
 | 启动服务器 | `app_main.py` | `app`, `on_startup()` |
-| 添加语音指令 | `app_main.py` | `start_ai_with_text_custom()` |
+| 添加语音指令 | `app_main.py` | `handle_command_text()` |
 | 导航状态切换 | `navigation_master.py` | `NavigationMaster.process_frame()` |
 | 盲道检测逻辑 | `workflow_blindpath.py` | `BlindPathNavigator.process_frame()` |
 | 过马路逻辑 | `workflow_crossstreet.py` | `CrossStreetNavigator` |
@@ -79,7 +77,7 @@
 | `YoloEBackend` | Class | yoloe_backend.py:18 | YOLO-E开放词汇检测后端 |
 | `ObstacleDetectorClient` | Class | obstacle_detector_client.py:16 | 障碍物检测客户端 |
 | `load_navigation_models` | Func | app_main.py:137 | 模型加载入口 |
-| `start_ai_with_text_custom` | Func | app_main.py:548 | 语音指令处理 |
+| `handle_command_text` | Func | app_main.py:548 | 语音/调试文本指令处理 |
 | `ws_camera_esp` | Func | app_main.py:1120 | ESP32视频WebSocket |
 | `process_imu_and_maybe_store` | Func | app_main.py:1449 | IMU数据处理 |
 | `get_device` | Func | device_utils.py:24 | 设备自动选择 |
@@ -155,7 +153,7 @@
 - 减少帧间抖动，提高导航连续性
 
 ### 多路音频
-- `audio_player.py` 支持 TTS语音 / AI回复 / 环境音 同时播放
+- `audio_player.py` 支持 TTS语音 / 环境音 播放
 - 使用 pygame 混音器
 
 ## COMMANDS

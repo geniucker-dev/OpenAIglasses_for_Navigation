@@ -16,7 +16,6 @@
 ├── trafficlight_detection.py   # 红绿灯 YOLO 检测
 ├── models.py                   # 模型加载统一入口
 ├── asr_core.py                 # DashScope 实时 ASR 回调
-├── omni_client.py              # Qwen-Omni 多模态对话
 ├── audio_player.py             # 多路音频播放
 ├── audio_compressor.py         # 音频压缩
 ├── audio_stream.py             # /stream.wav HTTP 音频流
@@ -25,7 +24,6 @@
 ├── device_utils.py             # CUDA / ROCm / MPS / CPU 自动选择 + AMP + GPU并发限流
 ├── crosswalk_awareness.py      # 斑马线感知
 ├── qwen_extractor.py           # Qwen 标签提取
-├── qwenturbo_template.py       # Qwen-Turbo 提示模板
 ├── utils.py                    # 通用工具函数
 ├── templates/
 │   └── index.html              # Web 监控界面（含滚动聊天面板）
@@ -85,13 +83,13 @@ ESP32 Mic
   → [PCM16, 16kHz, mono, 20ms] WebSocket /ws_audio
   → app_main.py
   → DashScope ASR
-  → 文本结果 / AI / 导航控制
+  → 文本结果 / 导航控制 / 找物品指令
 ```
 
 ### 音频下行
 
 ```text
-TTS / AI Reply
+系统语音 / 预录提示
   → audio_stream.py
   → [WAV] HTTP /stream.wav
   → ESP32 Speaker

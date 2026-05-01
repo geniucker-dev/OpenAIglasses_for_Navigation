@@ -65,7 +65,7 @@ static/
 
 ## CHAT PANEL SCROLLING
 
-- AI 回复面板（`#chatContainer`）是唯一滚动容器，`max-height` 由 CSS flex 布局链约束。
+- 消息面板（`#chatContainer`）是唯一滚动容器，`max-height` 由 CSS flex 布局链约束。
 - 新消息到达时自动 `scrollTop = scrollHeight` 滚到底部。
 - 桌面端 `.chat` 面板 `max-height: calc(100vh - 32px)`，移动端 `max-height: 70vh`。
 - 最终文本框不再随消息增加无限变长。

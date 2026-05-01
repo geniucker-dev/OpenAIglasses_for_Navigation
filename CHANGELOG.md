@@ -33,7 +33,7 @@
 - 标注文档中过时的"macOS 上缺少 GPU 加速支持"描述，改为 Apple Silicon 上支持 MPS
 - 同步相机断线重连后状态保持、语音映射回退、前端手机端布局调整等最近修复
 - ROCm/AMD GPU 上禁用 `cudnn.benchmark`，避免 MIOpen autotuning 导致推理卡顿
-- 前端聊天面板滚动修复：AI 回复面板不再随消息增加无限变长，`#chatContainer` 成为唯一滚动容器
+- 前端消息面板滚动修复：状态消息面板不再随消息增加无限变长，`#chatContainer` 成为唯一滚动容器
 - 回退全部 NCNN 迁移提交，恢复纯 PyTorch 推理路径
 
 ## [1.0.0] - 2025-01-XX
@@ -60,7 +60,6 @@
 
 - 🎙️ 实时语音交互
   - 阿里云 Paraformer ASR
-  - Qwen-Omni-Turbo 多模态对话
   - 智能指令解析
   - 上下文感知
 

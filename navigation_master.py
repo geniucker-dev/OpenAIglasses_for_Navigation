@@ -14,7 +14,7 @@ from workflow_crossstreet import CrossStreetNavigator, CrossStreetResult as Cros
 
 # ========== 状态常量 ==========
 IDLE = "IDLE"  # 空闲/未启用
-CHAT = "CHAT"  # 对话模式（不进行导航，只返回原始画面）
+CHAT = "CHAT"  # 待机/原始画面模式（保留历史状态名，已无 AI 对话）
 BLINDPATH_NAV = "BLINDPATH_NAV"  # 正在走盲道（复用 BlindPathNavigator）
 SEEKING_CROSSWALK = "SEEKING_CROSSWALK"  # 盲道阶段发现斑马线，正对准/靠近
 WAIT_TRAFFIC_LIGHT = "WAIT_TRAFFIC_LIGHT"  # 到达斑马线后等待交通灯（可选/占位）
@@ -372,7 +372,7 @@ class NavigationMaster:
             self.blind.reset()
 
     def stop_navigation(self):
-        """停止导航，回到对话模式"""
+        """停止导航，回到待机模式"""
         self.state = CHAT
         self.cooldown_until = time.time() + self.COOLDOWN_SEC
         if self.blind:
@@ -391,7 +391,7 @@ class NavigationMaster:
         self.cooldown_until = time.time() + self.COOLDOWN_SEC
 
     def is_in_navigation_mode(self):
-        """检查是否在导航模式（非对话模式）"""
+        """检查是否在导航模式（非待机模式）"""
         return self.state not in [
             "CHAT",
             "IDLE",
@@ -425,9 +425,9 @@ class NavigationMaster:
             print(f"[NAV MASTER] 找物品结束，恢复到导航状态 {self.state}")
             self.prev_nav_state_before_search = None
         else:
-            # 否则回到对话模式
+            # 否则回到待机模式
             self.state = CHAT
-            print(f"[NAV MASTER] 找物品结束，回到对话模式")
+            print(f"[NAV MASTER] 找物品结束，回到待机模式")
 
         self.cooldown_until = time.time() + self.COOLDOWN_SEC
 
@@ -552,18 +552,18 @@ class NavigationMaster:
     def process_frame(self, bgr: np.ndarray) -> OrchestratorResult:
         now = time.time()
 
-        # 【修改】IDLE状态默认进入CHAT模式，而不是自动开始导航
+        # 【修改】IDLE状态默认进入待机模式，而不是自动开始导航
         if self.state == IDLE:
             self.state = CHAT
             self.cooldown_until = now + self.COOLDOWN_SEC
 
-        # 【新增】CHAT模式：只返回原始画面，不进行导航
+        # 待机模式：只返回原始画面，不进行导航
         if self.state == CHAT:
             return OrchestratorResult(
                 annotated_image=bgr,
                 guidance_text="",
                 state="CHAT",
-                extras={"mode": "对话模式"},
+                extras={"mode": "待机模式"},
             )
 
         # 【新增】红绿灯检测模式：只返回原始画面，由红绿灯模块处理
